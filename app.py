@@ -143,6 +143,7 @@ def load_lexicons():
     # --- Fallback wajib: pastikan kata ini SELALU ada ---
     forced_pairs = {
         "ga": "tidak",
+        "g": "tidak",
         "gak": "tidak",
         "gk": "tidak",
         "enggak": "tidak",

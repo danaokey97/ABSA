@@ -386,6 +386,7 @@ POLAR_SWAP = {
     # Tekstur
     "berat": "ringan",
     "ringan": "berat",
+    "lengket": "tidak_lengket",
 
     # Efek
     "perih": "nyaman",

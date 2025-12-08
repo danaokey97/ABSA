@@ -1,0 +1,9 @@
+{
+  "lambda_boost": 0.9,
+  "gamma": 2.0,
+  "seed_bonus": 0.03,
+  "dampen_price_if_no_seed": true,
+  "price_delta": 0.7,
+  "thr": 0.35,
+  "max_k": 2
+}

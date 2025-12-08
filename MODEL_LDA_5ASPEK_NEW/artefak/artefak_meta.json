@@ -1,0 +1,12 @@
+{
+  "saved_at": "2025-11-26 14:14:37",
+  "lda_path": "/content/drive/MyDrive/SKRIPSI/COBA_LDA/MODEL_LDA_5ASPEK_NEW/Model_LDA/lda_model.gensim",
+  "dict_path": "/content/drive/MyDrive/SKRIPSI/COBA_LDA/MODEL_LDA_5ASPEK_NEW/Model_LDA/dictionary.gensim",
+  "bigram_path": "/content/drive/MyDrive/SKRIPSI/COBA_LDA/MODEL_LDA_5ASPEK_NEW/Model_LDA/bigram_phraser.pkl",
+  "mapping_xlsx": "/content/drive/MyDrive/SKRIPSI/COBA_LDA/MODEL_LDA_5ASPEK_NEW/Model_LDA/mapping_aspek_auto.xlsx",
+  "mapping_json": "/content/drive/MyDrive/SKRIPSI/COBA_LDA/MODEL_LDA_5ASPEK_NEW/Model_LDA/mapping_aspek_auto.json",
+  "seeds_json": "/content/drive/MyDrive/SKRIPSI/COBA_LDA/MODEL_LDA_5ASPEK_NEW/artefak/seeds1.json",
+  "boost_config": "/content/drive/MyDrive/SKRIPSI/COBA_LDA/MODEL_LDA_5ASPEK_NEW/artefak/boost_config.json",
+  "vocab_size": 1544,
+  "num_topics": 5
+}

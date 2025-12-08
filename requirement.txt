@@ -1,0 +1,9 @@
+streamlit
+gensim
+pandas
+numpy
+scikit-learn
+openpyxl
+wordcloud
+matplotlib
+plotly

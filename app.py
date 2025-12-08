@@ -221,13 +221,9 @@ def normalize_tokens_with_lexicon(tokens):
 
 def _apply_negation_rules(tokens):
     """
-    Terapkan aturan negasi generik:
-    - (NEG_WORD + kata) yang punya antonim di POLAR_SWAP => ganti antonim
+    - Jika (NEG_WORD + kata) ada di POLAR_SWAP → ganti dengan antonim.
       contoh: tidak mahal -> murah
-              gak lengket -> ringan
-    - (NEG_WORD + kata) yang TIDAK ada di POLAR_SWAP => jadikan token 'kata_neg'
-      contoh: tidak jelek -> jelek_neg (dan 'jelek' asli dihapus)
-    Dipakai di preprocessing sentimen KHUSUS ulasan tunggal (use_lexicon=True).
+    - Jika tidak ada di POLAR_SWAP → biarkan apa adanya (tidak bikin *_neg).
     """
     new_tokens = []
     skip_next = False
@@ -240,19 +236,20 @@ def _apply_negation_rules(tokens):
         if t in NEG_WORDS and i + 1 < len(tokens):
             nxt = tokens[i + 1]
 
-            # Case 1: ada antonim di kamus
             if nxt in POLAR_SWAP:
+                # Ada antonim di kamus → pakai antonim
                 new_tokens.append(POLAR_SWAP[nxt])
                 skip_next = True
             else:
-                # Case 2: generic – tandai sebagai negated token, buang kata aslinya
-                new_tokens.append(f"{nxt}_neg")
-                skip_next = True
+                # Tidak ada di kamus → simpan kata negasi dan kata aslinya
+                new_tokens.append(t)
+                # boleh juga tambahkan nxt, kalau mau:
+                # new_tokens.append(nxt)
+                skip_next = False   # kita tidak skip kata berikut
         else:
             new_tokens.append(t)
 
     return new_tokens
-
 
 # =====================================================
 # LOAD RESOURCES LDA (dictionary, lda, mapping, seeds)

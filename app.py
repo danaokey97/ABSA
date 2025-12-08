@@ -882,12 +882,12 @@ def main():
                 st.stop()
 
             # Tampilkan versi preproses (slang + kata dasar) sekadar info ke user
-            pre_single = preprocess_for_sentiment(text, use_lexicon=True)
+            pre_single = preprocess_for_sentiment(text, use_lexicon=False)
             st.markdown("**Teks setelah preprocessing (slang → baku + kata dasar):**")
             st.code(pre_single, language="text")
 
             # Segmentasi + LDA pakai lexicon
-            results = test_segmented_text(text, use_lexicon=True)
+            results = test_segmented_text(text, use_lexicon=False)
 
             rows = []
             for r in results:
@@ -896,7 +896,7 @@ def main():
 
                 # Sentimen pun pakai preproses yang sama (lexicon=True)
                 sent_label, _ = predict_sentiment_for_segment(
-                    seg_text, aspek, sent_models, use_lexicon=True
+                    seg_text, aspek, sent_models, use_lexicon=False
                 )
 
                 rows.append({

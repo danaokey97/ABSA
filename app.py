@@ -99,8 +99,7 @@ def split_into_sentences(text: str):
 @st.cache_resource
 def load_lexicons():
     """
-    Load slang dictionary & kata dasar.
-
+    Load slang dictionary saja (tanpa kata dasar).
     Format slang yang didukung:
     1) TXT/CSV biasa, satu pasangan per baris:
          ga, tidak
@@ -115,7 +114,7 @@ def load_lexicons():
         with open(SLANG_FILE, "r", encoding="utf-8") as f:
             content = f.read()
 
-        # --- Mode 2: pattern "slang": "baku" (bisa banyak dalam satu baris) ---
+        # --- Mode 2: pattern "slang": "baku" ---
         pair_pattern = re.compile(r'"([^"]+)"\s*:\s*"([^"]+)"')
         for s, n in pair_pattern.findall(content):
             slang_dict[s.strip().lower()] = n.strip().lower()
@@ -126,7 +125,6 @@ def load_lexicons():
             if not line or line.startswith("#"):
                 continue
 
-            # baris yang sudah bentuk "..." : "..." tadi sudah diproses, skip
             if ":" in line and '"' in line:
                 continue
 
@@ -152,16 +150,7 @@ def load_lexicons():
     for s, n in forced_pairs.items():
         slang_dict.setdefault(s, n)
 
-    # ================== LOAD KATA DASAR ==================
-    kata_dasar = set()
-    if os.path.exists(KATADASAR_FILE):
-        with open(KATADASAR_FILE, "r", encoding="utf-8") as f:
-            for line in f:
-                w = line.strip().lower()
-                if w:
-                    kata_dasar.add(w)
-
-    return slang_dict, kata_dasar
+    return slang_dict
 
 
 def _normalize_repeated_chars(token: str, max_repeat: int = 2) -> str:
@@ -191,13 +180,10 @@ def _lemmatize_token_with_katadasar(token: str, kata_dasar: set) -> str:
 
 def normalize_tokens_with_lexicon(tokens):
     """
-    Normalisasi token dengan:
-    - slang_dict
-    - kata_dasar
-    Dipakai KHUSUS untuk:
-    - Ulasan Tunggal (segmentasi + sentimen)
+    Normalisasi token dengan slang saja (tanpa kata_dasar).
+    Dipakai untuk ulasan tunggal (segmentasi + sentimen) jika use_lexicon=True.
     """
-    slang_dict, kata_dasar = load_lexicons()
+    slang_dict = load_lexicons()
 
     norm_tokens = []
     for tok in tokens:
@@ -206,15 +192,10 @@ def normalize_tokens_with_lexicon(tokens):
             continue
 
         # 🔒 WAJIB: semua variasi 'ga' selalu jadi 'tidak'
-        if t in {"ga", "gak", "gk", "engga", "enggak", "nggak"}:
+        if t in {"ga", "gak", "gk", "engga", "enggak", "nggak", "g"}:
             t = "tidak"
         else:
-            # map slang -> baku dari file slang_word.txt
             t = slang_dict.get(t, t)
-
-        # lemmatize ringan dengan kata_dasar
-        if kata_dasar:
-            t = _lemmatize_token_with_katadasar(t, kata_dasar)
 
         norm_tokens.append(t)
 
@@ -322,25 +303,41 @@ def load_sentiment_models():
 
     return models
 
+def gabung_negasi(text: str) -> str:
+    """
+    Gabungkan negasi + 1 kata setelahnya menjadi satu token dengan underscore.
+    Contoh: 'tidak kasar' -> 'tidak_kasar'
+    Ini harus konsisten dengan training LogReg kamu.
+    """
+    t = str(text).lower()
+
+    neg = r"(tidak|ga|gak|nggak|enggak|tak|tdk|bukan|kurang|gk|g)"
+    t = re.sub(rf"\b{neg}\s+(\w+)\b", r"\1_\2", t)
+
+    return t
+
 def preprocess_for_sentiment(text: str, use_lexicon: bool = False) -> str:
     """
     Preprocessing untuk input Logistic Regression.
-    - Secara default (dataset): _simple_clean saja (tanpa lexicon & negation rules)
-    - Jika use_lexicon=True (khusus ulasan tunggal di UI): 
-      + slang -> baku
-      + kata dasar
-      + aturan negasi generik (NEG_WORD + kata)
+    - Default (dataset): _simple_clean saja
+    - use_lexicon=True (ulasan tunggal): slang -> baku + negation rules (POLAR_SWAP)
+    - Selalu terapkan gabung_negasi() agar konsisten dengan training LogReg.
     """
     cleaned = _simple_clean(text)
     tokens = cleaned.split()
 
     if use_lexicon:
-        # slang + kata dasar
+        # slang saja
         tokens = normalize_tokens_with_lexicon(tokens)
-        # negation handling umum
+        # biarkan fitur negation POLAR_SWAP kamu tetap ada
         tokens = _apply_negation_rules(tokens)
 
-    return " ".join(tokens)
+    out = " ".join(tokens)
+
+    # ✅ konsisten dengan training
+    out = gabung_negasi(out)
+
+    return out
 
 def predict_sentiment_for_segment(seg_text: str, aspek: str, sent_models: dict, use_lexicon: bool = False):
     if aspek not in sent_models:

@@ -92,6 +92,20 @@ def split_into_sentences(text: str):
 
     return sentences
 
+def split_by_connectors(text: str):
+    """
+    Pecah kalimat panjang berdasarkan connector umum agar lebih mudah tersegmentasi.
+    Contoh:
+    "murah tapi wanginya menyengat" -> "murah. tapi wanginya menyengat"
+    """
+    if not isinstance(text, str):
+        text = str(text)
+
+    connectors = r"\b(tapi|tetapi|namun|padahal|walaupun|meskipun|sedangkan)\b"
+    text = re.sub(connectors, r". \1", text, flags=re.IGNORECASE)
+
+    return text
+
 # =====================================================
 # LEXICON: SLANG & KATA DASAR UNTUK PREPROSES SINGLE TEXT
 # =====================================================
@@ -477,10 +491,13 @@ def predict_aspect_boosted(
 
 
 def segment_text_for_aspect(text: str):
+    # ✅ Step 0: pecah dulu berdasarkan connector (tapi/tetapi/namun...)
+    text = split_by_connectors(text)
+
     sentences = split_into_sentences(text)
     segments = []
 
-    # --- 1) Segmentasi awal per kalimat + anchor BASE_ROOT + 'cocok' ---
+    # --- 1) Segmentasi awal per kalimat + anchor BASE_ROOT + SEED_ROOTS + 'cocok' ---
     for sent in sentences:
         tokens = sent.split()
         if not tokens:
@@ -491,22 +508,41 @@ def segment_text_for_aspect(text: str):
             root = _root_id(_simple_clean(tok))
 
             anchored = False
+
+            # ====================================================
+            # (1) Anchor berdasarkan BASE_ROOT (explicit keyword)
+            # ====================================================
             for aspek in ASPEK:
                 base = BASE_ROOT[aspek]
                 if base in root:
                     start_pos = idx
+
+                    # Rule: "segi harga" → segi + harga ikut
                     if idx > 0:
                         prev_root = _root_id(_simple_clean(tokens[idx - 1]))
                         if prev_root == "segi":
                             start_pos = idx - 1
+
                     anchor_list.append((start_pos, aspek))
                     anchored = True
                     break
 
+            # ====================================================
+            # (2) Kalau tidak anchored oleh BASE_ROOT → cek seed word
+            # ====================================================
+            if not anchored:
+                asp_seed = detect_aspect_from_token(tok)
+                if asp_seed is not None:
+                    anchor_list.append((idx, asp_seed))
+                    anchored = True
+
+            # ====================================================
+            # (3) Anchor khusus kata "cocok"
+            # ====================================================
             if not anchored and root == "cocok":
                 anchor_list.append((idx, "Efek"))
 
-        # tidak ada anchor → segmen umum (non-aspek)
+        # tidak ada anchor → segmen umum
         if not anchor_list:
             segments.append({
                 "seg_text": sent.strip(),
@@ -520,7 +556,7 @@ def segment_text_for_aspect(text: str):
             if not compressed or compressed[-1][1] != asp:
                 compressed.append((pos, asp))
 
-        # RULE: jika hanya 1 anchor dalam kalimat → seluruh kalimat milik aspek itu
+        # RULE: jika hanya 1 anchor → seluruh kalimat milik aspek itu
         if len(compressed) == 1:
             _, asp = compressed[0]
             segments.append({
@@ -529,7 +565,7 @@ def segment_text_for_aspect(text: str):
             })
             continue
 
-        # kalau anchor-nya > 1 → gunakan logika split
+        # kalau anchor > 1 → split
         prev_end = 0
         for i, (pos, asp) in enumerate(compressed):
             if prev_end < pos:
@@ -552,10 +588,9 @@ def segment_text_for_aspect(text: str):
 
             prev_end = end
 
-    # --- 2) TANPA refinement ekor: langsung pakai segments apa adanya ---
     refined = segments
 
-    # --- 3) Gabungkan segmen tanpa anchor ---
+    # --- 3) Gabungkan segmen tanpa anchor ke segmen anchor terdekat
     attached = []
     seen_anchor = False
 
@@ -578,10 +613,12 @@ def segment_text_for_aspect(text: str):
             seen_anchor = True
             i = j
         else:
-            tokens = curr["seg_text"].split()
+            tokens2 = curr["seg_text"].split()
+
+            # segmen awal pendek sebelum anchor → gabung ke anchor berikutnya
             if (
                 not seen_anchor
-                and len(tokens) <= 4
+                and len(tokens2) <= 4
                 and i < len(refined) - 1
                 and refined[i + 1].get("anchor_aspect") is not None
             ):
@@ -878,7 +915,7 @@ def main():
 
             # Tampilkan versi preproses (slang + kata dasar) sekadar info ke user
             pre_single = preprocess_for_sentiment(text, use_lexicon=True)
-            st.markdown("**Teks setelah preprocessing (slang → baku + kata dasar):**")
+            st.markdown("**Teks setelah preprocessing (slang → baku + negasi):**")
             st.code(pre_single, language="text")
 
             # Segmentasi + LDA pakai lexicon

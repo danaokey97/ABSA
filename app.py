@@ -689,7 +689,9 @@ def test_segmented_text(
             "aspect_prob_final": prob_final,
         })
 
-    # gabung segmen sangat pendek
+        # ==============================
+    # gabung segmen sangat pendek (FIXED)
+    # ==============================
     merged_short = []
     for item in labeled:
         tok_len = len(item["tokens"])
@@ -700,8 +702,9 @@ def test_segmented_text(
         no_anchor = item.get("anchor_aspect") is None
         total_seed_hits = sum(item["seed_hits"].values())
 
+        # ✅ hanya segmen pendek TANPA anchor yang digabung
         short_anchorless = (tok_len <= 4 and no_anchor and total_seed_hits == 0)
-        very_short_any  = (tok_len <= 2)
+        very_short_any  = (tok_len <= 2 and no_anchor)
 
         if short_anchorless or very_short_any:
             prev = merged_short[-1]

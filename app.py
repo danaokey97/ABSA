@@ -200,7 +200,7 @@ def predict_sentiment_for_segment(seg_text: str, aspek: str, sent_models: dict):
 
 SEGMENT_STOPWORDS = {
     "tidak", "gak", "nggak", "enggak", "ga",
-    "banget", "aja", "sih", "dong", "kok", "walaupun"
+    "banget", "aja", "sih", "dong", "kok", "walaupun",
     "dan", "atau", "yang", "itu", "ini","namun",
     "enak", "dipake", "pake", "nyaman", "kurang","tapi"
 }

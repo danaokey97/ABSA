@@ -413,31 +413,71 @@ def predict_aspect_boosted(
 
 
 def split_by_punct_and_conj(text: str):
+    """
+    Split stabil:
+    - split tanda baca: . ! ? ; :
+    - split konjungsi: tapi/namun/dst (konjungsi dibuang)
+    - split cue phrase: 'dari sisi', 'soal', 'untuk', 'selain itu', 'kalo/kalau'
+    Koma tidak memotong.
+    """
     text = str(text).replace("\n", ". ")
+
+    # split tanda baca dulu
     parts = re.split(r"[.!?;:]+", text)
     parts = [p.strip() for p in parts if p.strip()]
 
+    # cue split tambahan
+    CUE_PHRASES = [
+        "dari sisi", "soal", "untuk", "selain itu", "kalau", "kalo",
+        "menurutku", "menurut saya", "dari segi", "untungnya", "minusnya",
+        "plusnya", "kelebihannya", "kekurangannya", "overall"
+    ]
+
     out = []
     for p in parts:
-        toks = _simple_clean(p).split()
-        if not toks:
-            continue
+        p_clean = _simple_clean(p)
 
-        cut = None
-        for i, t in enumerate(toks):
-            if t in CONJ_SPLIT_WORDS and 0 < i < len(toks) - 1:
-                cut = i
-                break
+        # split cue phrase
+        tmp = [p_clean]
+        for cue in CUE_PHRASES:
+            new_tmp = []
+            for seg in tmp:
+                splitted = seg.split(cue)
+                if len(splitted) == 1:
+                    new_tmp.append(seg)
+                else:
+                    for i, s in enumerate(splitted):
+                        s = s.strip()
+                        if not s:
+                            continue
+                        if i > 0:
+                            # cue phrase disimpan di depan segmen biar konteksnya jelas
+                            new_tmp.append((cue + " " + s).strip())
+                        else:
+                            new_tmp.append(s)
+            tmp = new_tmp
 
-        if cut is None:
-            out.append(" ".join(toks).strip())
-        else:
-            left = " ".join(toks[:cut]).strip()
-            right = " ".join(toks[cut + 1:]).strip()
-            if left:
-                out.append(left)
-            if right:
-                out.append(right)
+        # split konjungsi
+        for seg in tmp:
+            toks = _simple_clean(seg).split()
+            if not toks:
+                continue
+
+            cut = None
+            for i, t in enumerate(toks):
+                if t in CONJ_SPLIT_WORDS and 0 < i < len(toks) - 1:
+                    cut = i
+                    break
+
+            if cut is None:
+                out.append(" ".join(toks).strip())
+            else:
+                left = " ".join(toks[:cut]).strip()
+                right = " ".join(toks[cut+1:]).strip()
+                if left:
+                    out.append(left)
+                if right:
+                    out.append(right)
 
     return out
 
@@ -462,43 +502,25 @@ def detect_aspect_simple(tokens, SEED_ROOTS):
 
 def segment_text_merge_by_aspect(text: str, bigram, SEED_ROOTS, use_lexicon=False):
     """
-    SEGMENTASI STABIL + CUT NATURAL:
-    - Split kasar punctuation + conjunction
-    - Switch aspek hanya jika:
-        1) BASE_ROOT eksplisit
-        2) seed aspect kuat (>=2 hits dalam window)
-    - KHUSUS switch ke Efek:
-        cut tidak langsung di token sekarang, tapi digeser ke kata pembuka efek:
-        {"bikin","jadi","hasilnya","membuat","menjadikan"}
-    - Segmen tidak boleh terlalu pendek
+    Segmentasi STABIL:
+    - Pemotongan hanya berdasarkan split_by_punct_and_conj()
+    - Tidak memotong berdasarkan seed
+    - anchor_aspect hanya dipakai jika ada BASE_ROOT eksplisit
+    - sisanya aspect final ditentukan oleh LDA + seed boosting (di test_segmented_text)
     """
-
     chunks = split_by_punct_and_conj(text)
     if not chunks:
         return []
 
-    WINDOW = 6
-    SEED_MIN_HITS = 2
-    MIN_WORDS = 4
-
-    # marker yang biasanya jadi awal "Efek"
-    EFFECT_ANCHORS = {"bikin", "jadi", "hasilnya", "membuat", "menjadikan", "efeknya", "hasil"}
-
-    def aspect_from_base_root(tok):
-        r = _root_id(tok)
-        for a in ASPEK:
-            if BASE_ROOT[a] in r:
-                return a
-        return None
-
-    def seed_hits_in_window(tokens_window):
-        roots = {_root_id(t) for t in tokens_window}
-        score = {a: len(SEED_ROOTS[a] & roots) for a in ASPEK}
-        best_a = max(score, key=score.get)
-        return best_a, score[best_a], score
-
     segs = []
-    last_aspect = None
+
+    def explicit_aspect_from_tokens(tokens_plain):
+        for tok in tokens_plain:
+            r = _root_id(tok)
+            for a in ASPEK:
+                if BASE_ROOT[a] in r:
+                    return a
+        return None
 
     for ch in chunks:
         toks_plain = _simple_clean(ch).split()
@@ -508,126 +530,23 @@ def segment_text_merge_by_aspect(text: str, bigram, SEED_ROOTS, use_lexicon=Fals
         if not toks_plain:
             continue
 
-        # tentukan aspek awal
-        current_aspect = None
-        start = 0
+        anchor = explicit_aspect_from_tokens(toks_plain)
 
-        # base-root dulu
-        for t in toks_plain:
-            a0 = aspect_from_base_root(t)
-            if a0 is not None:
-                current_aspect = a0
-                break
+        toks_lda = tokenize_from_val(ch, bigram=bigram)
+        if use_lexicon:
+            toks_lda = normalize_tokens_with_lexicon(toks_lda)
 
-        # seed kuat awal chunk
-        if current_aspect is None:
-            best_a, best_hits, _ = seed_hits_in_window(toks_plain[:WINDOW])
-            if best_hits >= SEED_MIN_HITS:
-                current_aspect = best_a
-            else:
-                current_aspect = last_aspect
+        segs.append({
+            "seg_text": ch.strip(),
+            "tokens": toks_lda,
+            "anchor_aspect": anchor,
+            "seed_hits": {a: 0 for a in ASPEK}
+        })
 
-        i = 0
-        while i < len(toks_plain):
-            tok = toks_plain[i]
+    # ✅ merge segmen akhir jika terlalu pendek dan tidak ada seed/base_root
+    segs = merge_last_segment_if_no_seed(segs, SEED_ROOTS, use_lexicon=use_lexicon, max_words=5)
 
-            # === (1) BASE ROOT SWITCH ===
-            a_base = aspect_from_base_root(tok)
-            if a_base is not None and current_aspect is not None and a_base != current_aspect:
-                left_tokens = toks_plain[start:i]
-                if len(left_tokens) >= MIN_WORDS:
-                    left_text = " ".join(left_tokens).strip()
-                    toks_lda = tokenize_from_val(left_text, bigram=bigram)
-                    if use_lexicon:
-                        toks_lda = normalize_tokens_with_lexicon(toks_lda)
-
-                    segs.append({
-                        "seg_text": left_text,
-                        "tokens": toks_lda,
-                        "anchor_aspect": current_aspect,
-                        "seed_hits": {a: 0 for a in ASPEK}
-                    })
-
-                    start = i
-                    current_aspect = a_base
-                    last_aspect = current_aspect
-
-                i += 1
-                continue
-
-            # === (2) SEED STRONG SWITCH ===
-            win = toks_plain[i:i+WINDOW]
-            best_a, best_hits, _ = seed_hits_in_window(win)
-
-            if (best_a is not None and current_aspect is not None and best_a != current_aspect and best_hits >= SEED_MIN_HITS):
-                
-                cut_pos = i
-
-                # ✅ KHUSUS jika aspek baru = Efek
-                # geser cut ke kata anchor efek supaya natural
-                if best_a == "Efek":
-                    for j in range(i, min(i+WINDOW, len(toks_plain))):
-                        if _root_id(toks_plain[j]) in EFFECT_ANCHORS:
-                            cut_pos = j
-                            break
-
-                left_tokens = toks_plain[start:cut_pos]
-                if len(left_tokens) >= MIN_WORDS:
-                    left_text = " ".join(left_tokens).strip()
-                    toks_lda = tokenize_from_val(left_text, bigram=bigram)
-                    if use_lexicon:
-                        toks_lda = normalize_tokens_with_lexicon(toks_lda)
-
-                    segs.append({
-                        "seg_text": left_text,
-                        "tokens": toks_lda,
-                        "anchor_aspect": current_aspect,
-                        "seed_hits": {a: 0 for a in ASPEK}
-                    })
-
-                    start = cut_pos
-                    current_aspect = best_a
-                    last_aspect = current_aspect
-
-            i += 1
-
-        # segmen terakhir
-        last_tokens = toks_plain[start:]
-        if last_tokens:
-            last_text = " ".join(last_tokens).strip()
-            toks_lda = tokenize_from_val(last_text, bigram=bigram)
-            if use_lexicon:
-                toks_lda = normalize_tokens_with_lexicon(toks_lda)
-
-            segs.append({
-                "seg_text": last_text,
-                "tokens": toks_lda,
-                "anchor_aspect": current_aspect,
-                "seed_hits": {a: 0 for a in ASPEK}
-            })
-
-    # merge aspek sama
-    merged = []
-    for item in segs:
-        if not merged:
-            merged.append(item)
-            continue
-
-        if item["anchor_aspect"] is not None and merged[-1]["anchor_aspect"] == item["anchor_aspect"]:
-            merged[-1]["seg_text"] += " " + item["seg_text"]
-            merged[-1]["tokens"].extend(item["tokens"])
-        else:
-            merged.append(item)
-    
-    # ✅ merge segmen terakhir jika tidak ada seed/base-root
-    merged = merge_last_segment_if_no_seed(
-        merged,
-        SEED_ROOTS=SEED_ROOTS,
-        use_lexicon=use_lexicon,
-        max_words=5
-    )
-
-    return merged
+    return segs
 
 
 def has_aspect_evidence(tokens_plain, SEED_ROOTS):
@@ -681,6 +600,44 @@ def merge_last_segment_if_no_seed(segs, SEED_ROOTS, use_lexicon=False, max_words
     prev["tokens"].extend(last["tokens"])
 
     return segs[:-1]  # drop last
+
+def has_aspect_evidence(tokens_plain, SEED_ROOTS):
+    roots = {_root_id(t) for t in tokens_plain}
+
+    for r in roots:
+        for a in ASPEK:
+            if BASE_ROOT[a] in r:
+                return True
+
+    for a in ASPEK:
+        if len(SEED_ROOTS[a] & roots) > 0:
+            return True
+
+    return False
+
+
+def merge_last_segment_if_no_seed(segs, SEED_ROOTS, use_lexicon=False, max_words=5):
+    if not segs or len(segs) < 2:
+        return segs
+
+    last = segs[-1]
+    prev = segs[-2]
+
+    toks_plain = _simple_clean(last["seg_text"]).split()
+    if use_lexicon:
+        toks_plain = normalize_tokens_with_lexicon(toks_plain)
+
+    if len(toks_plain) > max_words:
+        return segs
+
+    if has_aspect_evidence(toks_plain, SEED_ROOTS):
+        return segs
+
+    prev["seg_text"] = prev["seg_text"].rstrip(" ,") + " " + last["seg_text"].lstrip(" ,")
+    prev["tokens"].extend(last["tokens"])
+
+    return segs[:-1]
+
 
 def test_segmented_text(
     text,

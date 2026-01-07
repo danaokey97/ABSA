@@ -75,11 +75,12 @@ def split_into_sentences(text: str):
     sentences = []
 
     for line in lines:
-        parts = re.split(r"([.,!?])", line)
+        # ✅ HANYA split . ! ?
+        parts = re.split(r"([.!?])", line)
         buf = ""
 
         for part in parts:
-            if part in [".", "!", "?", ","]:
+            if part in [".", "!", "?"]:
                 buf += part
                 if buf.strip():
                     sentences.append(buf.strip())
@@ -633,163 +634,90 @@ CONJ_SPLIT_WORDS = {"tapi", "namun", "tetapi", "sedangkan", "walaupun", "meskipu
 
 def segment_text_for_aspect(text: str, use_lexicon=False):
     """
-    Segmentasi berbasis:
-    1) Split per kalimat
-    2) Deteksi anchor via BASE_ROOT (aroma/harga/kemas/tekstur/efek)
-    3) Jika > 1 anchor -> split antar anchor
-    4) Jika anchor gagal tapi seed > 1 aspek -> split via conjunction words
-    5) Sinkron dengan lexicon untuk ulasan tunggal
+    Segmentasi berdasarkan anchor aspek (BASE_ROOT/SEED_ROOTS).
+    Output segmen besar: dari anchor ke anchor berikutnya.
     """
+
+    _, _, bigram, _, _, SEED_ROOTS = load_resources()
 
     sentences = split_into_sentences(text)
     segments = []
 
-    # ambil SEED_ROOTS untuk fallback split
-    _, _, _, _, _, SEED_ROOTS = load_resources()
+    def token_aspect(tok: str):
+        r = _root_id(_simple_clean(tok))
+        if not r or r in SEGMENT_STOPWORDS:
+            return None
+
+        # BASE_ROOT dulu
+        for a in ASPEK:
+            if BASE_ROOT[a] in r:
+                return a
+
+        # seed
+        for a in ASPEK:
+            if r in SEED_ROOTS[a]:
+                return a
+
+        return None
 
     for sent in sentences:
-        # ✅ TOKEN BERSIH
-        tokens = _simple_clean(sent).split()
-
-        # ✅ sinkron dengan lexicon (mode ulasan tunggal)
+        toks_plain = _simple_clean(sent).split()
         if use_lexicon:
-            tokens = normalize_tokens_with_lexicon(tokens)
-
-        if not tokens:
+            toks_plain = normalize_tokens_with_lexicon(toks_plain)
+        if not toks_plain:
             continue
 
-        # ============================================================
-        # 1) DETEKSI ANCHOR LIST BERDASARKAN BASE_ROOT
-        # ============================================================
-        anchor_list = []
-        for idx, tok in enumerate(tokens):
-            root = _root_id(tok)
+        # cari anchor posisi aspek
+        anchors = []
+        for i, t in enumerate(toks_plain):
+            a = token_aspect(t)
+            if a is not None:
+                # compress anchor berurutan aspek sama
+                if not anchors or anchors[-1][1] != a:
+                    anchors.append((i, a))
 
-            anchored = False
-            for aspek in ASPEK:
-                base = BASE_ROOT[aspek]
-                if base in root:  # contoh: "harganya" mengandung "harga"
-                    start_pos = idx
-
-                    # rule "segi harga" / "segi aroma"
-                    if idx > 0 and tokens[idx - 1] == "segi":
-                        start_pos = idx - 1
-
-                    anchor_list.append((start_pos, aspek))
-                    anchored = True
-                    break
-
-            # anchor khusus: "cocok" -> Efek
-            if not anchored and root == "cocok":
-                anchor_list.append((idx, "Efek"))
-
-        # ============================================================
-        # 2) FALLBACK: kalau anchor tidak cukup tapi seed muncul > 1 aspek
-        # ============================================================
-        detected_seed_aspects = set()
-        for tok in tokens:
-            r = _root_id(tok)
-            for a in ASPEK:
-                if r in SEED_ROOTS[a]:
-                    detected_seed_aspects.add(a)
-
-        # Kalau kalimat punya seed dari >=2 aspek tapi anchor tidak terdeteksi
-        # → split berdasarkan conjunction words seperti "tapi/namun"
-        if len(detected_seed_aspects) >= 2 and len(anchor_list) <= 1:
-            split_pos = None
-            for i, t in enumerate(tokens):
-                if t in CONJ_SPLIT_WORDS:
-                    split_pos = i
-                    break
-
-            if split_pos is not None:
-                left = " ".join(tokens[:split_pos]).strip()
-                right = " ".join(tokens[split_pos + 1:]).strip()
-
-                if left:
-                    segments.append({"seg_text": left, "anchor_aspect": None})
-                if right:
-                    segments.append({"seg_text": right, "anchor_aspect": None})
-
-                continue  # lanjut ke kalimat berikutnya
-
-        # ============================================================
-        # 3) JIKA TIDAK ADA ANCHOR: MASUKKAN SEBAGAI SEGMENT UMUM
-        # ============================================================
-        if not anchor_list:
-            segments.append({
-                "seg_text": " ".join(tokens).strip(),
-                "anchor_aspect": None
-            })
+        # kalau tidak ada anchor -> segmen umum
+        if not anchors:
+            segments.append({"seg_text": " ".join(toks_plain), "anchor_aspect": None})
             continue
 
-        # ============================================================
-        # 4) COMPRESS ANCHOR BERURUTAN DENGAN ASPEK SAMA
-        # ============================================================
-        compressed = []
-        for pos, asp in sorted(anchor_list, key=lambda x: x[0]):
-            if not compressed or compressed[-1][1] != asp:
-                compressed.append((pos, asp))
-
-        # ============================================================
-        # 5) RULE: JIKA HANYA 1 ANCHOR -> SATU SEGMENT (ASPEK ITU)
-        # ============================================================
-        if len(compressed) == 1:
-            _, asp = compressed[0]
-            segments.append({
-                "seg_text": " ".join(tokens).strip(),
-                "anchor_aspect": asp
-            })
-            continue
-
-        # ============================================================
-        # 6) SPLIT ANTAR ANCHOR
-        # ============================================================
-        prev_end = 0
-        for i, (pos, asp) in enumerate(compressed):
-            if prev_end < pos:
-                seg_tokens = tokens[prev_end:pos]
-                seg_text = " ".join(seg_tokens).strip()
-                if seg_text:
-                    segments.append({"seg_text": seg_text, "anchor_aspect": None})
-
-            end = compressed[i + 1][0] if i + 1 < len(compressed) else len(tokens)
-            seg_tokens = tokens[pos:end]
+        # kalau ada anchor -> potong dari anchor ke anchor berikutnya
+        for idx, (pos, asp) in enumerate(anchors):
+            end = anchors[idx + 1][0] if idx + 1 < len(anchors) else len(toks_plain)
+            seg_tokens = toks_plain[pos:end]
             seg_text = " ".join(seg_tokens).strip()
             if seg_text:
                 segments.append({"seg_text": seg_text, "anchor_aspect": asp})
 
-            prev_end = end
-
-    # ============================================================
-    # 7) GABUNG SEGMENT TANPA ANCHOR KE SEGMENT ANCHOR SETELAHNYA
-    # ============================================================
+    # attach segmen tanpa anchor ke segmen anchor terdekat (lanjutan)
     attached = []
-    seen_anchor = False
-    i = 0
-
-    while i < len(segments):
-        curr = segments[i]
-        asp_curr = curr.get("anchor_aspect", None)
-
-        if asp_curr is not None:
-            combined_text = curr["seg_text"]
-            j = i + 1
-            while j < len(segments) and segments[j].get("anchor_aspect") is None:
-                combined_text += " " + segments[j]["seg_text"]
-                j += 1
-
-            attached.append({
-                "seg_text": combined_text.strip(),
-                "anchor_aspect": asp_curr,
-            })
-            seen_anchor = True
-            i = j
+    last_anchor = None
+    for s in segments:
+        if s["anchor_aspect"] is not None:
+            attached.append(s)
+            last_anchor = s["anchor_aspect"]
         else:
-            attached.append(curr)
-            i += 1
+            # kalau ada anchor sebelumnya, attach ke dia
+            if last_anchor is not None and attached:
+                attached[-1]["seg_text"] += " " + s["seg_text"]
+            else:
+                attached.append(s)
 
-    return attached
+    # buat tokens LDA untuk tiap segmen (pakai bigram disini saja)
+    out = []
+    for s in attached:
+        seg_text = s["seg_text"]
+        toks = tokenize_from_val(seg_text, bigram=bigram)
+        if use_lexicon:
+            toks = normalize_tokens_with_lexicon(toks)
+
+        out.append({
+            "seg_text": seg_text,
+            "tokens": toks,
+            "anchor_aspect": s["anchor_aspect"],
+        })
+
+    return out
 
 
 def test_segmented_text(
@@ -829,7 +757,8 @@ def test_segmented_text(
 
         return True
 
-    seg_infos = segment_text_aspect_aware(text, use_lexicon=use_lexicon)
+    # ✅ pakai segmenter yang benar
+    seg_infos = segment_text_for_aspect(text, use_lexicon=use_lexicon)
 
     if not seg_infos:
         seg_infos = [{
@@ -839,11 +768,15 @@ def test_segmented_text(
             "seed_hits": {a: 0 for a in ASPEK}
         }]
 
+    # =========================
+    # Label setiap segmen
+    # =========================
     labeled = []
     for info in seg_infos:
-        seg = info["seg_text"]
+        seg = info.get("seg_text", "")
         anchor = info.get("anchor_aspect", None)
         toks = info.get("tokens", None)
+
         if not toks:
             toks = tokenize_from_val(seg, bigram=bigram)
             if use_lexicon:
@@ -874,7 +807,9 @@ def test_segmented_text(
             "aspect_prob_final": prob_final,
         })
 
-    # === merge segmen sangat pendek (hanya kalau aman)
+    # =========================
+    # Merge segmen sangat pendek (hanya kalau aman)
+    # =========================
     merged_short = []
     for item in labeled:
         if not merged_short:
@@ -882,6 +817,7 @@ def test_segmented_text(
             continue
 
         prev = merged_short[-1]
+
         tok_len = len(item["tokens"])
         no_anchor = item.get("anchor_aspect") is None
         total_seed_hits = sum(item["seed_hits"].values()) if item.get("seed_hits") else 0
@@ -906,7 +842,11 @@ def test_segmented_text(
                 prefer_seed_for_top1=prefer_seed_for_top1
             )
 
-            anchor_combined = prev.get("anchor_aspect", None) if prev.get("anchor_aspect") is not None else item.get("anchor_aspect", None)
+            # anchor tidak boleh berubah sembarangan
+            anchor_combined = prev.get("anchor_aspect", None)
+            if anchor_combined is None:
+                anchor_combined = item.get("anchor_aspect", None)
+
             aspect_final2 = anchor_combined if anchor_combined is not None else aspect2
 
             merged_short[-1] = {
@@ -921,7 +861,9 @@ def test_segmented_text(
         else:
             merged_short.append(item)
 
-    # === merge segmen ber-aspek sama (hanya kalau aman)
+    # =========================
+    # Merge segmen ber-aspek sama (hanya kalau aman)
+    # =========================
     merged = []
     for item in merged_short:
         if not merged:
@@ -971,17 +913,22 @@ def test_segmented_text(
         else:
             merged.append(item)
 
+    # =========================
+    # Output
+    # =========================
     results = []
     for i, r in enumerate(merged, start=1):
         results.append({
             "seg_index": i,
-            "seg_text": r["seg_text"],          # ✅ sudah bersih (tanpa underscore)
+            "seg_text": r["seg_text"],
             "p_boost": r["p_boost"],
             "seed_hits": r["seed_hits"],
             "aspect_final": r["aspect_final"],
             "aspect_prob_final": r["aspect_prob_final"],
         })
+
     return results
+
 
 
 # =====================================================

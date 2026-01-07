@@ -505,22 +505,24 @@ def split_by_conjunction(seg: str):
 
 def detect_aspect_by_seed(tokens):
     """
-    Deteksi aspek:
-    1) lewat BASE_ROOT dulu (harga/aroma/tekstur/kemas/efek)
-    2) kalau tidak ketemu baru pakai seed
+    Deteksi aspek BERDASARKAN KEYWORD:
+    1) BASE_ROOT (harga/aroma/tekstur/kemas/efek)  -> kuat buat "harganya"
+    2) SEED_ROOTS (dari seeds.json)
+    Return: (best_aspect or None, hits_per_aspect)
     """
     _, _, _, _, _, SEED_ROOTS = load_resources()
 
     roots = [_root_id(t) for t in tokens]
+    roots_set = set(roots)
 
-    # 1) cek BASE_ROOT (lebih kuat untuk 'harganya', 'aromanya')
+    # 1) BASE_ROOT dulu (paling eksplisit)
     for r in roots:
         for a in ASPEK:
             if BASE_ROOT[a] in r:
+                # hits diset 0 saja (tidak wajib dipakai di sini)
                 return a, {asp: 0 for asp in ASPEK}
 
-    # 2) cek seed
-    roots_set = set(roots)
+    # 2) Seed-based hits
     hits = {a: len(SEED_ROOTS[a] & roots_set) for a in ASPEK}
 
     best_aspect = None
@@ -537,71 +539,105 @@ def detect_aspect_by_seed(tokens):
 
 def segment_text_aspect_aware(text: str, use_lexicon=False):
     """
-    Segmentasi final:
-    1) split berdasarkan tanda baca
-    2) split berdasarkan konjungsi (tapi, namun, dll)
-    3) deteksi aspek per segmen pakai seed
-    4) merge segmen berturut-turut jika aspek sama
-       TAPI: kalau segmen dimulai konjungsi -> jangan merge
+    Segmentasi sesuai logika kamu:
+    - Segmen dipotong HANYA saat ditemukan keyword aspek yang BERBEDA dari aspek aktif.
+    - Keyword aspek = BASE_ROOT atau SEED_ROOTS (via detect_aspect_by_seed()).
+    - Kalau tidak ada keyword baru -> lanjutkan segmen yang sama.
+    - Output: list of dict {seg_text, tokens, anchor_aspect, seed_hits}
     """
 
     _, _, bigram, _, _, _ = load_resources()
 
-    # 1) split punctuation
-    rough = split_by_punctuation(text)
+    # Tokenisasi konsisten
+    toks_all = tokenize_from_val(text, bigram=bigram)
+    if use_lexicon:
+        toks_all = normalize_tokens_with_lexicon(toks_all)
 
-    # 2) split conjunction
-    fine = []
-    for s in rough:
-        fine.extend(split_by_conjunction(s))
+    # Edge case: kosong
+    if not toks_all:
+        return [{
+            "seg_text": "",
+            "tokens": [],
+            "anchor_aspect": None,
+            "seed_hits": {a: 0 for a in ASPEK}
+        }]
 
-    # 3) detect aspek tiap segmen (seed)
-    segs = []
-    for seg in fine:
-        toks = tokenize_from_val(seg, bigram=bigram)
+    # Helper: aspek token tunggal (base_root / seed)
+    def aspect_of_token(tok: str):
+        # Cek BASE_ROOT cepat
+        r = _root_id(tok)
+        for a in ASPEK:
+            if BASE_ROOT[a] in r:
+                return a
+        # Cek seed roots
+        _, _, _, _, _, SEED_ROOTS = load_resources()
+        for a in ASPEK:
+            if r in SEED_ROOTS[a]:
+                return a
+        return None
 
-        if use_lexicon:
-            toks = normalize_tokens_with_lexicon(toks)
+    # Scan token, potong kalau aspek berubah
+    segments = []
+    start = 0
+    current_aspect = None
 
-        asp_seed, hits = detect_aspect_by_seed(toks)
+    for i, tok in enumerate(toks_all):
+        a_tok = aspect_of_token(tok)
 
-        segs.append({
-            "seg_text": seg.strip(),
-            "tokens": toks,
-            "anchor_aspect": asp_seed,   # boleh None
+        # set aspek pertama kali ketemu
+        if current_aspect is None and a_tok is not None:
+            current_aspect = a_tok
+
+        # kalau ketemu aspek baru yang beda -> cut segmen
+        if a_tok is not None and current_aspect is not None and a_tok != current_aspect:
+            seg_tokens = toks_all[start:i]
+            seg_text = " ".join(seg_tokens).strip()
+
+            anchor, hits = detect_aspect_by_seed(seg_tokens)
+            # anchor fallback: kalau detect_aspect_by_seed gagal, pakai current_aspect lama
+            if anchor is None:
+                anchor = current_aspect
+
+            if seg_text:
+                segments.append({
+                    "seg_text": seg_text,
+                    "tokens": seg_tokens,
+                    "anchor_aspect": anchor,
+                    "seed_hits": hits
+                })
+
+            # mulai segmen baru
+            start = i
+            current_aspect = a_tok
+
+    # segmen terakhir
+    seg_tokens = toks_all[start:]
+    seg_text = " ".join(seg_tokens).strip()
+
+    anchor, hits = detect_aspect_by_seed(seg_tokens)
+    if anchor is None:
+        anchor = current_aspect  # boleh None kalau memang tidak ada keyword sama sekali
+
+    if seg_text:
+        segments.append({
+            "seg_text": seg_text,
+            "tokens": seg_tokens,
+            "anchor_aspect": anchor,
             "seed_hits": hits
         })
 
-    # 4) merge berurutan kalau aspek sama
+    # Merge terakhir: kalau dua segmen berturut aspek sama -> gabung (sesuai maumu)
     merged = []
-    prev_aspect = None
-
-    for item in segs:
-        asp = item["anchor_aspect"]
-        txt = item["seg_text"].strip()
-        first_word = txt.split()[0] if txt.split() else ""
-
-        # kalau segmen dimulai konjungsi -> pasti segmen baru
-        starts_with_conj = first_word in CONJ_SPLIT_WORDS2
-
-        # RULE: kalau aspek None tapi bukan segmen konjungsi,
-        # dan sebelumnya punya aspek, maka diwariskan (lanjutan konteks)
-        if asp is None and prev_aspect is not None and not starts_with_conj:
-            asp = prev_aspect
-            item["anchor_aspect"] = asp
-
+    for seg in segments:
         if not merged:
-            merged.append(item)
-            prev_aspect = asp
+            merged.append(seg)
             continue
-
-        # RULE merge: merge hanya jika aspek sama dan tidak diawali konjungsi
-        if asp == prev_aspect and asp is not None and not starts_with_conj:
-            merged[-1]["seg_text"] += " " + item["seg_text"]
-            merged[-1]["tokens"].extend(item["tokens"])
+        if seg["anchor_aspect"] is not None and seg["anchor_aspect"] == merged[-1]["anchor_aspect"]:
+            merged[-1]["seg_text"] += " " + seg["seg_text"]
+            merged[-1]["tokens"].extend(seg["tokens"])
+            # seed_hits boleh dibiarkan (atau recompute), gak kritikal
         else:
-            merged.append(item)
-            prev_aspect = asp
+            merged.append(seg)
 
     return merged
 
@@ -776,16 +812,53 @@ def test_segmented_text(
     dampen_price_if_no_seed=True,
     price_delta=0.7,
     prefer_seed_for_top1=True,
-    use_lexicon=False,   # <--- KHUSUS single text: True
+    use_lexicon=False,
 ):
     """
-    Jika use_lexicon=True:
-      - token untuk LDA + seed akan dinormalisasi dengan slang & kata dasar.
-    Dataset (run_absa_on_dataframe) tetap pakai use_lexicon=False supaya
-    konsisten dengan training korpus LDA.
+    Versi FIX:
+    - Menghormati segmentasi dari segment_text_aspect_aware()
+    - TIDAK akan menggabungkan segmen jika anchor_aspect beda
+    - TIDAK akan menggabungkan segmen jika seed-dominant beda (mis. Aroma vs Harga)
+    - Merge segmen pendek hanya jika masih 1 aspek
     """
     _, _, bigram, _, _, _ = load_resources()
 
+    def dominant_seed_aspect(seed_hits: dict):
+        """Ambil aspek dengan seed hit terbesar. None kalau semua 0/None."""
+        if not seed_hits:
+            return None
+        best_a = None
+        best_v = 0
+        for a, v in seed_hits.items():
+            if v > best_v:
+                best_v = v
+                best_a = a
+        return best_a if best_v > 0 else None
+
+    def can_merge(prev_item: dict, curr_item: dict) -> bool:
+        """
+        TRUE hanya jika aman digabung:
+        - kalau dua-duanya punya anchor_aspect dan beda -> FALSE
+        - kalau seed dominant beda -> FALSE
+        """
+        ap = prev_item.get("anchor_aspect")
+        ac = curr_item.get("anchor_aspect")
+
+        if ap is not None and ac is not None and ap != ac:
+            return False
+
+        dp = dominant_seed_aspect(prev_item.get("seed_hits"))
+        dc = dominant_seed_aspect(curr_item.get("seed_hits"))
+
+        if dp is not None and dc is not None and dp != dc:
+            return False
+
+        # kalau salah satu None, kita anggap masih mungkin lanjutan
+        return True
+
+    # =========================
+    # 1) ambil segmen dari segmenter
+    # =========================
     seg_infos = segment_text_aspect_aware(text, use_lexicon=use_lexicon)
 
     if not seg_infos:
@@ -796,13 +869,21 @@ def test_segmented_text(
             "seed_hits": {a: 0 for a in ASPEK}
         }]
 
+    # =========================
+    # 2) label per segmen
+    # =========================
     labeled = []
     for info in seg_infos:
         seg = info["seg_text"]
         anchor = info.get("anchor_aspect", None)
-        toks = info["tokens"]
 
-        p_raw, hits, p_boost, aspect_pred, aspect_top1_plain = predict_aspect_boosted(
+        toks = info.get("tokens")
+        if not toks:
+            toks = tokenize_from_val(seg, bigram=bigram)
+            if use_lexicon:
+                toks = normalize_tokens_with_lexicon(toks)
+
+        p_raw, hits_lda, p_boost, aspect_pred, aspect_top1_plain = predict_aspect_boosted(
             toks,
             lambda_boost=lambda_boost,
             gamma=gamma,
@@ -812,41 +893,51 @@ def test_segmented_text(
             prefer_seed_for_top1=prefer_seed_for_top1
         )
 
+        # kalau segmenter sudah kasih seed_hits, pakai itu; kalau tidak ada, pakai hits dari predict_aspect_boosted
+        seed_hits = info.get("seed_hits", None)
+        if seed_hits is None:
+            seed_hits = hits_lda
+
         aspect_final = anchor if anchor is not None else aspect_pred
-        prob_final   = p_boost[aspect_final]
+        prob_final = p_boost.get(aspect_final, 0.0)
 
         labeled.append({
             "seg_text": seg,
             "anchor_aspect": anchor,
             "tokens": toks,
             "p_boost": p_boost,
-            "seed_hits": hits,
+            "seed_hits": seed_hits,
             "aspect_final": aspect_final,
             "aspect_prob_final": prob_final,
         })
 
-    # gabung segmen sangat pendek
+    # =========================
+    # 3) gabung segmen sangat pendek (TAPI hanya jika aman)
+    # =========================
     merged_short = []
     for item in labeled:
-        tok_len = len(item["tokens"])
         if not merged_short:
             merged_short.append(item)
             continue
 
+        prev = merged_short[-1]
+
+        # aturan pendek yang kamu punya
+        tok_len = len(item["tokens"])
         no_anchor = item.get("anchor_aspect") is None
-        total_seed_hits = sum(item["seed_hits"].values())
+        total_seed_hits = sum(item["seed_hits"].values()) if item.get("seed_hits") else 0
 
         short_anchorless = (tok_len <= 4 and no_anchor and total_seed_hits == 0)
-        very_short_any  = (tok_len <= 2)
+        very_short_any = (tok_len <= 2)
 
-        if short_anchorless or very_short_any:
-            prev = merged_short[-1]
+        # ✅ kunci: hanya merge kalau "aman" (tidak beda aspek via anchor/seed)
+        if (short_anchorless or very_short_any) and can_merge(prev, item):
             combined_text = prev["seg_text"].rstrip(" ,") + " " + item["seg_text"].lstrip(" ,")
+            toks2 = tokenize_from_val(combined_text, bigram=bigram)
+            if use_lexicon:
+                toks2 = normalize_tokens_with_lexicon(toks2)
 
-            toks_raw2 = tokenize_from_val(combined_text, bigram=bigram)
-            toks2 = normalize_tokens_with_lexicon(toks_raw2) if use_lexicon else toks_raw2
-
-            p_raw2, hits2, p_boost2, aspect2, aspect_top1_plain2 = predict_aspect_boosted(
+            p_raw2, hits2, p_boost2, aspect2, _ = predict_aspect_boosted(
                 toks2,
                 lambda_boost=lambda_boost,
                 gamma=gamma,
@@ -856,8 +947,9 @@ def test_segmented_text(
                 prefer_seed_for_top1=prefer_seed_for_top1
             )
 
-            anchor_combined = prev.get("anchor_aspect", None)
-            aspect_final2   = anchor_combined if anchor_combined is not None else aspect2
+            # anchor tidak boleh berubah
+            anchor_combined = prev.get("anchor_aspect", None) if prev.get("anchor_aspect", None) is not None else item.get("anchor_aspect", None)
+            aspect_final2 = anchor_combined if anchor_combined is not None else aspect2
 
             merged_short[-1] = {
                 "seg_text": combined_text,
@@ -866,12 +958,14 @@ def test_segmented_text(
                 "p_boost": p_boost2,
                 "seed_hits": hits2,
                 "aspect_final": aspect_final2,
-                "aspect_prob_final": p_boost2[aspect_final2],
+                "aspect_prob_final": p_boost2.get(aspect_final2, 0.0),
             }
         else:
             merged_short.append(item)
 
-    # gabung segmen ber-aspek sama
+    # =========================
+    # 4) gabung segmen ber-aspek sama (TAPI hanya jika aman)
+    # =========================
     merged = []
     for item in merged_short:
         if not merged:
@@ -879,6 +973,8 @@ def test_segmented_text(
             continue
 
         prev = merged[-1]
+
+        # kalau aspek final sama + tidak ada konflik anchor + aman dari seed/anchor -> merge
         same_aspect = (item["aspect_final"] == prev["aspect_final"])
 
         anchor_prev = prev.get("anchor_aspect", None)
@@ -889,13 +985,13 @@ def test_segmented_text(
             anchor_prev != anchor_curr
         )
 
-        if same_aspect and not anchor_conflict:
+        if same_aspect and (not anchor_conflict) and can_merge(prev, item):
             combined_text = prev["seg_text"].rstrip(" ,") + " " + item["seg_text"].lstrip(" ,")
+            toks2 = tokenize_from_val(combined_text, bigram=bigram)
+            if use_lexicon:
+                toks2 = normalize_tokens_with_lexicon(toks2)
 
-            toks_raw2 = tokenize_from_val(combined_text, bigram=bigram)
-            toks2 = normalize_tokens_with_lexicon(toks_raw2) if use_lexicon else toks_raw2
-
-            p_raw2, hits2, p_boost2, aspect2, aspect_top1_plain2 = predict_aspect_boosted(
+            p_raw2, hits2, p_boost2, aspect2, _ = predict_aspect_boosted(
                 toks2,
                 lambda_boost=lambda_boost,
                 gamma=gamma,
@@ -915,11 +1011,14 @@ def test_segmented_text(
                 "p_boost": p_boost2,
                 "seed_hits": hits2,
                 "aspect_final": aspect_final2,
-                "aspect_prob_final": p_boost2[aspect_final2],
+                "aspect_prob_final": p_boost2.get(aspect_final2, 0.0),
             }
         else:
             merged.append(item)
 
+    # =========================
+    # 5) output
+    # =========================
     results = []
     for i, r in enumerate(merged, start=1):
         results.append({

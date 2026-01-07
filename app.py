@@ -458,6 +458,72 @@ def segment_text_for_aspect(text: str):
                 i += 1
 
     return attached
+def segment_text_seed_state_machine(text: str):
+    """
+    SEGMENTASI FINAL SESUAI LOGIKA KAMU:
+    - Scan token satu-satu
+    - Aspect aktif bertahan sampai ketemu seed aspek berbeda
+    - Kalau aspek sama → tidak potong
+    - Token tanpa seed ikut aspek aktif
+    """
+
+    _, _, bigram, _, _, SEED_ROOTS = load_resources()
+
+    tokens = normalize_text(text).split()  # sudah split klitik & clean
+    if not tokens:
+        return []
+
+    def aspect_of(tok):
+        r = _root_id(tok)
+
+        # BASE_ROOT dulu
+        for a in ASPEK:
+            if BASE_ROOT[a] in r:
+                return a
+
+        # SEED_ROOTS
+        for a in ASPEK:
+            if r in SEED_ROOTS[a]:
+                return a
+
+        return None
+
+    segments = []
+    buf = []
+    current_aspect = None
+
+    for tok in tokens:
+        a_tok = aspect_of(tok)
+
+        # awal
+        if current_aspect is None and a_tok is not None:
+            current_aspect = a_tok
+
+        # CUT jika ketemu aspek berbeda
+        if a_tok is not None and current_aspect is not None and a_tok != current_aspect:
+            seg_text = " ".join(buf).strip()
+            if seg_text:
+                segments.append({
+                    "seg_text": join_clitics_id(seg_text),
+                    "seg_text_model": seg_text,
+                    "anchor_aspect": current_aspect
+                })
+
+            buf = [tok]
+            current_aspect = a_tok
+        else:
+            buf.append(tok)
+
+    # seg terakhir
+    seg_text = " ".join(buf).strip()
+    if seg_text:
+        segments.append({
+            "seg_text": join_clitics_id(seg_text),
+            "seg_text_model": seg_text,
+            "anchor_aspect": current_aspect
+        })
+
+    return segments
 
 
 def test_segmented_text(
@@ -471,7 +537,7 @@ def test_segmented_text(
 ):
     _, _, bigram, _, _, _ = load_resources()
 
-    seg_infos = segment_text_for_aspect(text)
+    seg_infos = segment_text_seed_state_machine(text)
 
     labeled = []
     for info in seg_infos:

@@ -459,7 +459,7 @@ def detect_aspect_simple(tokens, SEED_ROOTS):
     return best_a, score
 
 
-def segment_text_merge_by_aspect(text: str, use_lexicon=False):
+def segment_text_merge_by_aspect(text: str, bigram, SEED_ROOTS, use_lexicon=False):
     """
     Segmentasi FINAL (pakai SEED_ROOTS dari seeds.json sebagai trigger)
     1) split kasar (tanda baca + konjungsi)
@@ -469,7 +469,6 @@ def segment_text_merge_by_aspect(text: str, use_lexicon=False):
     4) kalau tidak ada seed -> WARISKAN aspek sebelumnya
     5) merge jika aspek sama
     """
-    _, _, bigram, _, _, SEED_ROOTS = load_resources()
 
     chunks = split_by_punct_and_conj(text)
     if not chunks:
@@ -489,7 +488,7 @@ def segment_text_merge_by_aspect(text: str, use_lexicon=False):
                 if BASE_ROOT[a] in r:
                     return a
 
-        # 2) kalau tidak ada BASE_ROOT, cek seed hits
+        # 2) kalau tidak ada BASE_ROOT, cek seed hits dari seeds.json
         roots = {_root_id(t) for t in tokens_plain}
         seed_scores = {a: len(SEED_ROOTS[a] & roots) for a in ASPEK}
 

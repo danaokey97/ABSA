@@ -787,13 +787,15 @@ def test_segmented_text(
     _, _, bigram, _, _, _ = load_resources()
 
     seg_infos = segment_text_aspect_aware(text, use_lexicon=use_lexicon)
+
     if not seg_infos:
-    seg_infos = [{
-        "seg_text": text,
-        "anchor_aspect": None,
-        "tokens": tokenize_from_val(text, bigram=bigram),
-        "seed_hits": {a: 0 for a in ASPEK}
-    }]
+        seg_infos = [{
+            "seg_text": text,
+            "anchor_aspect": None,
+            "tokens": tokenize_from_val(text, bigram=bigram),
+            "seed_hits": {a: 0 for a in ASPEK}
+        }]
+
     labeled = []
     for info in seg_infos:
         seg = info["seg_text"]

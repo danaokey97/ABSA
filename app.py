@@ -530,7 +530,7 @@ def detect_aspect_by_seed(tokens):
 
     return best_aspect, hits
 
-CONJ_JUNK = {"tapi", "namun", "tetapi", "sedangkan", "walaupun", "meskipun", "cuma", "hanya"}
+CONJ_WORDS = {"tapi", "namun", "tetapi", "sedangkan", "walaupun", "meskipun", "cuma", "hanya"}
 
 def segment_text_aspect_aware(text: str, use_lexicon=False):
     """

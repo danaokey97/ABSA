@@ -657,7 +657,7 @@ def test_segmented_text(
     """
     _, _, bigram, _, _, _ = load_resources()
 
-    seg_infos = segment_text_for_aspect(text)
+    seg_infos = segment_text_for_aspect(text, use_lexicon=use_lexicon)
 
     labeled = []
     for info in seg_infos:

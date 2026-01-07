@@ -91,11 +91,11 @@ def split_into_sentences(text: str):
     sentences = []
 
     for line in lines:
-        parts = re.split(r"([.!?])", line)  # ✅ tanpa koma
+        parts = re.split(r"([.,!?])", line)
         buf = ""
 
         for part in parts:
-            if part in [".", "!", "?"]:
+            if part in [".", "!", "?", ","]:
                 buf += part
                 if buf.strip():
                     sentences.append(buf.strip())
@@ -200,7 +200,7 @@ def predict_sentiment_for_segment(seg_text: str, aspek: str, sent_models: dict):
 
 SEGMENT_STOPWORDS = {
     "tidak", "gak", "nggak", "enggak", "ga",
-    "banget", "aja", "sih", "dong", "kok", "walaupun",
+    "banget", "aja", "sih", "dong", "kok", "walaupun"
     "dan", "atau", "yang", "itu", "ini","namun",
     "enak", "dipake", "pake", "nyaman", "kurang","tapi"
 }
@@ -280,104 +280,172 @@ def predict_aspect_boosted(
     return p_aspek, seed_hits, p_boost, aspect_final, aspect_top1_plain
 
 
-CONJ_TRIM = {"dan", "tapi", "namun", "tetapi", "sedangkan", "walaupun", "meskipun", "cuma", "hanya"}
-
 def segment_text_for_aspect(text: str):
-    """
-    Segmentasi versi kamu:
-    - tokenisasi pakai normalize_text (clitic split untuk model)
-    - deteksi aspek pakai seeds.json (termasuk seed phrase underscore)
-    - potong segmen hanya jika ketemu seed aspek baru yang BEDA
-    - seed aspek sama ketemu lagi -> tidak potong
-    """
-    _, _, _, _, SEED_DICT, _ = load_resources()
-
-    # --- build seed phrase index (1-3 gram) ---
-    seed_phr = {a: {1: set(), 2: set(), 3: set()} for a in ASPEK}
-    for a in ASPEK:
-        for w in SEED_DICT[a]:
-            parts = [p for p in str(w).split("_") if p]
-            roots = tuple(_root_id(p) for p in parts)
-            L = len(roots)
-            if 1 <= L <= 3:
-                seed_phr[a][L].add(roots)
-
-    def match_seed(roots, i):
-        # prioritas phrase panjang
-        for L in (3, 2, 1):
-            if i + L <= len(roots):
-                tup = tuple(roots[i:i+L])
-                for a in ASPEK:
-                    if tup in seed_phr[a][L]:
-                        return a, L
-        return None, 0
-
-    def trim_edges(toks):
-        while toks and _root_id(toks[0]) in CONJ_TRIM:
-            toks = toks[1:]
-        while toks and _root_id(toks[-1]) in CONJ_TRIM:
-            toks = toks[:-1]
-        return toks
-
-    # tokens untuk model (sudah clitic-split)
-    norm = normalize_text(text)
-    toks = norm.split()
-    toks = trim_edges(toks)
-    if not toks:
-        return []
-
-    roots = [_root_id(t) for t in toks]
-
+    sentences = split_into_sentences(text)
     segments = []
-    start = 0
-    current_aspect = None
+
+    # --- 1) Segmentasi awal per kalimat + anchor BASE_ROOT + 'cocok' ---
+    for sent in sentences:
+        cleaned = _simple_clean(sent)
+        cleaned = split_clitics_id(cleaned)
+        tokens = cleaned.split()
+
+
+
+        if not tokens:
+            continue
+
+        anchor_list = []
+        for idx, tok in enumerate(tokens):
+            root = _root_id(_simple_clean(tok))
+
+            anchored = False
+            for aspek in ASPEK:
+                base = BASE_ROOT[aspek]
+                if base in root:
+                    start_pos = idx
+                    if idx > 0:
+                        prev_root = _root_id(_simple_clean(tokens[idx - 1]))
+                        if prev_root == "segi":
+                            start_pos = idx - 1
+                    anchor_list.append((start_pos, aspek))
+                    anchored = True
+                    break
+
+
+
+
+        if not anchor_list:
+            seg_text = sent.strip()
+            segments.append({
+                "seg_text": seg_text,
+                "seg_text_model": normalize_text(seg_text),
+                "anchor_aspect": None
+            })
+
+            continue
+
+        compressed = []
+        for pos, asp in sorted(anchor_list, key=lambda x: x[0]):
+            if not compressed or compressed[-1][1] != asp:
+                compressed.append((pos, asp))
+
+        prev_end = 0
+        for i, (pos, asp) in enumerate(compressed):
+            if prev_end < pos:
+                seg_tokens = tokens[prev_end:pos]
+                seg_text = " ".join(seg_tokens).strip(" ,")
+                if seg_text:
+                    segments.append({
+                        "seg_text": seg_text,
+                        "seg_text_model": normalize_text(seg_text),
+                        "anchor_aspect": None
+                    })
+
+
+            end = compressed[i + 1][0] if i + 1 < len(compressed) else len(tokens)
+            seg_tokens = tokens[pos:end]
+            seg_text = " ".join(seg_tokens).strip(" ,")
+            if seg_text:
+                segments.append({
+                "seg_text": seg_text,
+                "seg_text_model": normalize_text(seg_text),
+                "anchor_aspect": asp
+            })
+
+
+            prev_end = end
+
+    # --- 2) Refinement ekor segmen milik aspek berikutnya ---
+    refined = []
+    BACK_WINDOW = 4
 
     i = 0
-    while i < len(roots):
-        a, L = match_seed(roots, i)
+    while i < len(segments):
+        curr = segments[i]
 
-        # set aspek pertama kali ketemu seed
-        if current_aspect is None and a is not None:
-            current_aspect = a
+        if i < len(segments) - 1:
+            nxt = segments[i + 1]
+            a1 = curr.get("anchor_aspect", None)
+            a2 = nxt.get("anchor_aspect", None)
 
-        # cut kalau aspek beda
-        if a is not None and current_aspect is not None and a != current_aspect:
-            left = toks[start:i]
-            left = trim_edges(left)
-            if left:
-                seg_text_model = " ".join(left).strip()
-                segments.append({
-                    "seg_text": seg_text_model,         # masih clitic-split, nanti join buat display
-                    "seg_text_model": seg_text_model,   # untuk model & sentimen
-                    "anchor_aspect": current_aspect
-                })
+            if a1 is not None and a2 is not None and a1 != a2:
+                orig_tokens = curr["seg_text"].split()
+                split_idx = None
 
-            start = i
-            current_aspect = a
+                for j, tok in enumerate(orig_tokens):
+                    asp_tok = detect_aspect_from_token(tok)
+                    if asp_tok == a2:
+                        split_idx = max(0, j - BACK_WINDOW)
+                        break
 
-        i += max(L, 1)
+                if split_idx is not None and 0 < split_idx < len(orig_tokens) - 1:
+                    left_text  = " ".join(orig_tokens[:split_idx]).strip(" ,")
+                    right_head = " ".join(orig_tokens[split_idx:]).strip(" ,")
 
-    # segmen terakhir
-    last = toks[start:]
-    last = trim_edges(last)
-    if last:
-        seg_text_model = " ".join(last).strip()
-        segments.append({
-            "seg_text": seg_text_model,
-            "seg_text_model": seg_text_model,
-            "anchor_aspect": current_aspect  # bisa None kalau gak ada seed sama sekali
-        })
+                    if left_text:
+                        refined.append({
+                            "seg_text": left_text,
+                            "anchor_aspect": a1
+                        })
 
-    # merge kalau anchor_aspect sama (biar rapih)
-    merged = []
-    for s in segments:
-        if merged and merged[-1]["anchor_aspect"] == s["anchor_aspect"]:
-            merged[-1]["seg_text"] += " " + s["seg_text"]
-            merged[-1]["seg_text_model"] += " " + s["seg_text_model"]
+                    combined_text = (right_head + " " + nxt["seg_text"]).strip()
+
+                    refined.append({
+                        "seg_text": combined_text,
+                        "anchor_aspect": a2
+                    })
+
+                    i += 2
+                    continue
+
+        refined.append(curr)
+        i += 1
+
+    # --- 3) Gabungkan segmen tanpa anchor ---
+    attached = []
+    seen_anchor = False
+
+    i = 0
+    while i < len(refined):
+        curr = refined[i]
+        asp_curr = curr.get("anchor_aspect", None)
+
+        if asp_curr is not None:
+            combined_text = curr["seg_text"]
+            j = i + 1
+            while j < len(refined) and refined[j].get("anchor_aspect") is None:
+                combined_text += " " + refined[j]["seg_text"]
+                j += 1
+
+            attached.append({
+                "seg_text": combined_text.strip(),
+                "anchor_aspect": asp_curr,
+            })
+            seen_anchor = True
+            i = j
         else:
-            merged.append(s)
+            tokens = curr["seg_text"].split()
+            if (
+                not seen_anchor
+                and len(tokens) <= 4
+                and i < len(refined) - 1
+                and refined[i + 1].get("anchor_aspect") is not None
+            ):
+                nxt = refined[i + 1]
+                combined_text = curr["seg_text"] + " " + nxt["seg_text"]
 
-    return merged
+                attached.append({
+                    "seg_text": combined_text.strip(),
+                    "anchor_aspect": nxt["anchor_aspect"],
+                })
+                seen_anchor = True
+                i = i + 2
+            else:
+                attached.append(curr)
+                i += 1
+
+    return attached
 
 
 def test_segmented_text(
@@ -393,22 +461,16 @@ def test_segmented_text(
 
     seg_infos = segment_text_for_aspect(text)
 
-    if not seg_infos:
-        seg_infos = [{
-            "seg_text": normalize_text(text),
-            "seg_text_model": normalize_text(text),
-            "anchor_aspect": None
-        }]
-
     labeled = []
     for info in seg_infos:
         seg_display = info["seg_text"]
-        seg_model   = info.get("seg_text_model", seg_display)
-        anchor      = info.get("anchor_aspect", None)
-
+        seg_model = info.get("seg_text_model", seg_display)
+        anchor = info.get("anchor_aspect", None)
+        
         toks = tokenize_from_val(seg_model, bigram=bigram)
 
-        p_raw, hits, p_boost, aspect_pred, _ = predict_aspect_boosted(
+
+        p_raw, hits, p_boost, aspect_pred, aspect_top1_plain = predict_aspect_boosted(
             toks,
             lambda_boost=lambda_boost,
             gamma=gamma,
@@ -419,11 +481,10 @@ def test_segmented_text(
         )
 
         aspect_final = anchor if anchor is not None else aspect_pred
-        prob_final   = p_boost.get(aspect_final, 0.0)
+        prob_final   = p_boost[aspect_final]
 
         labeled.append({
-            "seg_text": seg_display,
-            "seg_text_model": seg_model,
+            "seg_text": seg_display,  
             "anchor_aspect": anchor,
             "tokens": toks,
             "p_boost": p_boost,
@@ -432,25 +493,94 @@ def test_segmented_text(
             "aspect_prob_final": prob_final,
         })
 
-    # merge hanya jika aspek_final sama dan tidak konflik anchor
-    merged = []
+    # gabung segmen sangat pendek
+    merged_short = []
     for item in labeled:
+        tok_len = len(item["tokens"])
+        if not merged_short:
+            merged_short.append(item)
+            continue
+
+        no_anchor = item.get("anchor_aspect") is None
+        total_seed_hits = sum(item["seed_hits"].values())
+
+        short_anchorless = (tok_len <= 4 and no_anchor and total_seed_hits == 0)
+        very_short_any  = (tok_len <= 2)
+
+        if short_anchorless or very_short_any:
+            prev = merged_short[-1]
+            combined_text = prev["seg_text"].rstrip(" ,") + " " + item["seg_text"].lstrip(" ,")
+            combined_tokens = tokenize_from_val(combined_text, bigram=bigram)
+
+            p_raw2, hits2, p_boost2, aspect2, aspect_top1_plain2 = predict_aspect_boosted(
+                combined_tokens,
+                lambda_boost=lambda_boost,
+                gamma=gamma,
+                seed_bonus=seed_bonus,
+                dampen_price_if_no_seed=dampen_price_if_no_seed,
+                price_delta=price_delta,
+                prefer_seed_for_top1=prefer_seed_for_top1
+            )
+
+            anchor_combined = prev.get("anchor_aspect", None)
+            aspect_final2   = anchor_combined if anchor_combined is not None else aspect2
+
+            merged_short[-1] = {
+                "seg_text": combined_text,
+                "anchor_aspect": anchor_combined,
+                "tokens": combined_tokens,
+                "p_boost": p_boost2,
+                "seed_hits": hits2,
+                "aspect_final": aspect_final2,
+                "aspect_prob_final": p_boost2[aspect_final2],
+            }
+        else:
+            merged_short.append(item)
+
+    # gabung segmen ber-aspek sama
+    merged = []
+    for item in merged_short:
         if not merged:
             merged.append(item)
             continue
 
         prev = merged[-1]
-        same = (item["aspect_final"] == prev["aspect_final"])
+        same_aspect = (item["aspect_final"] == prev["aspect_final"])
 
-        anchor_prev = prev.get("anchor_aspect")
-        anchor_curr = item.get("anchor_aspect")
-        anchor_conflict = (anchor_prev is not None and anchor_curr is not None and anchor_prev != anchor_curr)
+        anchor_prev = prev.get("anchor_aspect", None)
+        anchor_curr = item.get("anchor_aspect", None)
+        anchor_conflict = (
+            anchor_prev is not None and
+            anchor_curr is not None and
+            anchor_prev != anchor_curr
+        )
 
-        if same and not anchor_conflict:
-            prev["seg_text"] += " " + item["seg_text"]
-            prev["seg_text_model"] += " " + item["seg_text_model"]
-            prev["tokens"].extend(item["tokens"])
-            # p_boost/seed_hits biarin yang terakhir aja (atau recompute kalau mau)
+        if same_aspect and not anchor_conflict:
+            combined_text = prev["seg_text"].rstrip(" ,") + " " + item["seg_text"].lstrip(" ,")
+            combined_tokens = tokenize_from_val(combined_text, bigram=bigram)
+
+            p_raw2, hits2, p_boost2, aspect2, aspect_top1_plain2 = predict_aspect_boosted(
+                combined_tokens,
+                lambda_boost=lambda_boost,
+                gamma=gamma,
+                seed_bonus=seed_bonus,
+                dampen_price_if_no_seed=dampen_price_if_no_seed,
+                price_delta=price_delta,
+                prefer_seed_for_top1=prefer_seed_for_top1
+            )
+
+            anchor_combined = anchor_prev if anchor_prev is not None else anchor_curr
+            aspect_final2 = anchor_combined if anchor_combined is not None else aspect2
+
+            merged[-1] = {
+                "seg_text": combined_text,
+                "anchor_aspect": anchor_combined,
+                "tokens": combined_tokens,
+                "p_boost": p_boost2,
+                "seed_hits": hits2,
+                "aspect_final": aspect_final2,
+                "aspect_prob_final": p_boost2[aspect_final2],
+            }
         else:
             merged.append(item)
 
@@ -459,7 +589,6 @@ def test_segmented_text(
         results.append({
             "seg_index": i,
             "seg_text": r["seg_text"],
-            "seg_text_model": r["seg_text_model"],
             "p_boost": r["p_boost"],
             "seed_hits": r["seed_hits"],
             "aspect_final": r["aspect_final"],
@@ -484,10 +613,10 @@ def run_absa_on_dataframe(df_raw, _sent_models):
         for seg in segments:
             aspek = seg["aspect_final"]
         
-            seg_text_display = join_clitics_id(r["seg_text"])
-            seg_text_model   = r["seg_text_model"]
-            sent_label, _ = predict_sentiment_for_segment(seg_text_model, aspek, sent_models)
-
+            seg_text_display = seg["seg_text"]  # DISPLAY
+            seg_text_model = seg.get("seg_text_model", seg_text_display)  # MODEL
+        
+            sent_label, _ = predict_sentiment_for_segment(seg_text_model, aspek, _sent_models)
         
             data_rows.append({
                 "original_index": idx,
@@ -970,7 +1099,7 @@ def main():
     <hr style="margin-top:40px;">
 
     <div style="text-align:center; font-size:13px; color:gray; padding:10px;">
-        © 2025 Rifqi — Female Daily Review Analysis Dashboard  
+        © 2025 Dzikry — Female Daily Review Analysis Dashboard  
     </div>
     """, unsafe_allow_html=True)
 

@@ -785,20 +785,29 @@ def detect_aspect_simple(tokens):
 
 def segment_text_merge_by_aspect(text: str, use_lexicon=False):
     """
-    PERBAIKAN:
-    - explicit (BASE_ROOT) paling prioritas
-    - seed kuat (>=MIN_STRONG) boleh jadi aspek
-    - seed lemah -> None dulu, nanti diwariskan (forward/backward)
-    - aman walau detect_aspect_simple return 2 atau 3 nilai
+    FINAL FIX:
+    1) split kasar: punctuation + conjunction (split_by_punct_and_conj)
+    2) jika hasilnya cuma 1 chunk panjang (tanpa tanda baca) -> split lagi berdasarkan kemunculan aspek eksplisit
+       (aroma/tekstur/harga/kemas/efek) supaya bisa jadi >1 segmen
+    3) explicit aspect (BASE_ROOT) prioritas
+    4) seed kuat (>=MIN_STRONG) boleh label; seed lemah -> None lalu diwariskan (forward/backward)
+    5) merge jika aspek sama
     """
     _, _, bigram, _, _, _ = load_resources()
 
-    chunks = split_by_punct_and_conj(text)
-    if not chunks:
-        return []
+    # ---------- helper: robust detect_aspect_simple ----------
+    def safe_detect_seed(tokens_plain):
+        res = detect_aspect_simple(tokens_plain)
+        if isinstance(res, tuple) and len(res) == 3:
+            asp_seed, hits, best_seed = res
+        elif isinstance(res, tuple) and len(res) == 2:
+            asp_seed, hits = res
+            best_seed = hits.get(asp_seed, 0) if asp_seed else 0
+        else:
+            asp_seed, hits, best_seed = None, {a: 0 for a in ASPEK}, 0
+        return asp_seed, hits, best_seed
 
-    MIN_STRONG = 2  # minimal hit seed supaya dianggap kuat
-
+    # ---------- helper: explicit aspect ----------
     def explicit_aspect_from_tokens(tokens_plain):
         for tok in tokens_plain:
             r = _root_id(tok)
@@ -807,6 +816,62 @@ def segment_text_merge_by_aspect(text: str, use_lexicon=False):
                     return a
         return None
 
+    # ---------- helper: split by explicit aspect anchors ----------
+    def split_by_explicit_aspect_anchor(raw_text: str):
+        """
+        Pecah teks jika menemukan token yang mengandung BASE_ROOT aspek
+        contoh: "... lembab cerah teksturnya tidak lengket ..." =>
+        ["... lembab cerah", "teksturnya tidak lengket ..."]
+        """
+        toks = _simple_clean(raw_text).split()
+        if use_lexicon:
+            toks = normalize_tokens_with_lexicon(toks)
+
+        # cari posisi anchor explicit
+        anchors = []
+        for i, tok in enumerate(toks):
+            r = _root_id(tok)
+            for a in ASPEK:
+                if BASE_ROOT[a] in r:
+                    anchors.append(i)
+                    break
+
+        if not anchors:
+            return [raw_text.strip()]
+
+        # kalau anchor pertama bukan di awal, kita split dari situ
+        anchors = sorted(set(anchors))
+        out = []
+        start = 0
+        for pos in anchors:
+            if pos == 0:
+                continue
+            left = " ".join(toks[start:pos]).strip()
+            if left:
+                out.append(left)
+            start = pos
+
+        right = " ".join(toks[start:]).strip()
+        if right:
+            out.append(right)
+
+        return out if out else [raw_text.strip()]
+
+    # ===================== 1) split awal =====================
+    chunks = split_by_punct_and_conj(text)
+    chunks = [c.strip() for c in chunks if c and c.strip()]
+
+    if not chunks:
+        return []
+
+    # ===================== 2) kalau masih 1 chunk panjang, split lagi pakai anchor explicit =====================
+    # threshold 20 token supaya teks pendek tidak over-split
+    if len(chunks) == 1 and len(_simple_clean(chunks[0]).split()) >= 20:
+        chunks = split_by_explicit_aspect_anchor(chunks[0])
+
+    MIN_STRONG = 2
+
+    # ===================== 3) label tiap chunk =====================
     items = []
     for ch in chunks:
         toks_plain = _simple_clean(ch).split()
@@ -815,17 +880,8 @@ def segment_text_merge_by_aspect(text: str, use_lexicon=False):
 
         asp_explicit = explicit_aspect_from_tokens(toks_plain)
 
-        # ---- robust call detect_aspect_simple ----
-        res = detect_aspect_simple(toks_plain)
-        if isinstance(res, tuple) and len(res) == 3:
-            asp_seed, hits, best_seed = res
-        elif isinstance(res, tuple) and len(res) == 2:
-            asp_seed, hits = res
-            best_seed = hits.get(asp_seed, 0) if asp_seed else 0
-        else:
-            asp_seed, hits, best_seed = None, {a: 0 for a in ASPEK}, 0
+        asp_seed, hits, best_seed = safe_detect_seed(toks_plain)
 
-        # label awal
         if asp_explicit is not None:
             asp = asp_explicit
             strong = True
@@ -849,7 +905,7 @@ def segment_text_merge_by_aspect(text: str, use_lexicon=False):
             "is_strong": strong,
         })
 
-    # forward fill dari aspek kuat sebelumnya
+    # ===================== 4) forward fill =====================
     last_strong = None
     for it in items:
         if it["anchor_aspect"] is not None and it["is_strong"]:
@@ -857,7 +913,7 @@ def segment_text_merge_by_aspect(text: str, use_lexicon=False):
         elif it["anchor_aspect"] is None and last_strong is not None:
             it["anchor_aspect"] = last_strong
 
-    # backward fill dari aspek kuat setelahnya (buat awal teks yang None)
+    # ===================== 5) backward fill =====================
     next_strong = None
     for i in range(len(items) - 1, -1, -1):
         it = items[i]
@@ -866,7 +922,7 @@ def segment_text_merge_by_aspect(text: str, use_lexicon=False):
         elif it["anchor_aspect"] is None and next_strong is not None:
             it["anchor_aspect"] = next_strong
 
-    # merge kalau aspek sama
+    # ===================== 6) merge aspek sama =====================
     segs = []
     for it in items:
         asp = it["anchor_aspect"]
@@ -877,7 +933,6 @@ def segment_text_merge_by_aspect(text: str, use_lexicon=False):
             segs.append(it)
 
     return segs
-
 
 def test_segmented_text(
     text,

@@ -786,6 +786,52 @@ def detect_aspect_simple(tokens):
         return None, score
     return best_a, score
 
+def has_aspect_evidence(tokens_plain, SEED_ROOTS):
+    roots = {_root_id(t) for t in tokens_plain}
+
+    # cek BASE_ROOT eksplisit
+    for r in roots:
+        for a in ASPEK:
+            if BASE_ROOT[a] in r:
+                return True
+
+    # cek seed hits
+    for a in ASPEK:
+        if len(SEED_ROOTS[a] & roots) > 0:
+            return True
+
+    return False
+
+
+def merge_short_tail_segments(segs, SEED_ROOTS, use_lexicon=False, max_words=2):
+    """
+    Gabungkan segmen yang terlalu pendek (<= max_words)
+    dan tidak punya seed/base_root ke segmen sebelumnya.
+    Ini mencegah segmen seperti: "akan", "tetap", "rekomen", dll berdiri sendiri.
+    """
+    if not segs or len(segs) < 2:
+        return segs
+
+    merged = [segs[0]]
+
+    for i in range(1, len(segs)):
+        curr = segs[i]
+        prev = merged[-1]
+
+        toks_plain = _simple_clean(curr["seg_text"]).split()
+        if use_lexicon:
+            toks_plain = normalize_tokens_with_lexicon(toks_plain)
+
+        # kalau segmen pendek dan tidak punya evidence aspek -> merge
+        if len(toks_plain) <= max_words and not has_aspect_evidence(toks_plain, SEED_ROOTS):
+            prev["seg_text"] = prev["seg_text"].rstrip(" ,") + " " + curr["seg_text"].lstrip(" ,")
+            prev["tokens"].extend(curr["tokens"])
+        else:
+            merged.append(curr)
+
+    return merged
+
+
 def segment_text_merge_by_aspect(text: str, use_lexicon=False):
     """
     LOGIKA FINAL:
@@ -851,8 +897,12 @@ def segment_text_merge_by_aspect(text: str, use_lexicon=False):
             segs[-1]["tokens"].extend(item["tokens"])
         else:
             segs.append(item)
+    # ✅ merge segmen super pendek (mis: "akan", "tetap") jika tidak punya seed/base_root
+    _, _, _, _, _, SEED_ROOTS = load_resources()
+    segs = merge_short_tail_segments(segs, SEED_ROOTS, use_lexicon=use_lexicon, max_words=3)
 
     return segs
+
 
 
 def test_segmented_text(

@@ -548,31 +548,34 @@ def segment_text_aspect_aware(text: str, use_lexicon=False):
         })
 
     # 4) merge berurutan kalau aspek sama
-    merged = []
-    prev_asp = None
+        merged = []
+    prev_aspect = None
 
     for item in segs:
         asp = item["anchor_aspect"]
+        txt = item["seg_text"].strip()
+        first_word = txt.split()[0] if txt.split() else ""
 
-        # kalau segmen ini tidak ada aspek tapi sebelumnya ada → anggap lanjutan
-        if asp is None and prev_asp is not None:
-            asp = prev_asp
+        # ✅ RULE: kalau segmen dimulai konjungsi -> pasti segmen baru
+        starts_with_conj = first_word in CONJ_SPLIT_WORDS2
+
+        if asp is None and prev_aspect is not None and not starts_with_conj:
+            # hanya diwariskan kalau BUKAN konjungsi (lanjutan kalimat)
+            asp = prev_aspect
             item["anchor_aspect"] = asp
 
         if not merged:
             merged.append(item)
-            prev_asp = asp
+            prev_aspect = asp
             continue
 
-        # merge kalau aspek sama
-        if asp == prev_asp and asp is not None:
+        # ✅ merge hanya jika aspek sama dan tidak dimulai konjungsi
+        if asp == prev_aspect and asp is not None and not starts_with_conj:
             merged[-1]["seg_text"] += " " + item["seg_text"]
             merged[-1]["tokens"].extend(item["tokens"])
         else:
             merged.append(item)
-            prev_asp = asp
-
-    return merged
+            prev_aspect = asp
 
 CONJ_SPLIT_WORDS = {"tapi", "namun", "tetapi", "sedangkan", "walaupun", "meskipun"}
 

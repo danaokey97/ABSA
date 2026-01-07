@@ -762,37 +762,36 @@ def split_by_punct_and_conj(text: str):
 
 def detect_aspect_simple(tokens):
     """
-    Deteksi aspek dominan dari tokens:
-    - BASE_ROOT (harga/aroma/tekstur/kemas/efek) kasih skor kuat
-    - SEED_ROOTS dari seeds.json
+    Seed-only detection:
+    - pakai _expand_for_seed supaya token bigram/underscore tetap kehitung
+    - scoring murni hit seed.json
     """
-    _, _, _, _, _, SEED_ROOTS = load_resources()
+    _, _, _, _, SEED_DICT, _ = load_resources()
 
-    roots = {_root_id(t) for t in tokens}
+    # expand underscore -> parts + token
+    expanded = _expand_for_seed(tokens)  # hasilnya sudah di-root_id
     score = {a: 0 for a in ASPEK}
 
-    # skor dari seed roots
     for a in ASPEK:
-        score[a] += len(SEED_ROOTS[a] & roots)
-
-    # bonus kuat dari base_root substring (mis: harganya -> harga)
-    for r in roots:
-        for a in ASPEK:
-            if BASE_ROOT[a] in r:
-                score[a] += 3
+        seed_roots = {_root_id(w) for w in SEED_DICT[a]}
+        score[a] = len(seed_roots & expanded)
 
     best_a = max(score, key=score.get)
-    if score[best_a] == 0:
-        return None, score
-    return best_a, score
+    best_score = score[best_a]
+
+    if best_score == 0:
+        return None, score, 0
+    return best_a, score, best_score
 
 def segment_text_merge_by_aspect(text: str, use_lexicon=False):
     """
-    LOGIKA FINAL:
-    1) split kasar (tanda baca + konjungsi)
-    2) kalau chunk mengandung kata aspek eksplisit (kemas/aroma/tekstur/harga/efek) -> pakai itu (switch boleh)
-    3) kalau tidak ada kata aspek eksplisit -> WARISKAN aspek sebelumnya (JANGAN switch pakai seed)
-    4) kalau awal teks dan tidak ada aspek eksplisit -> baru pakai seed
+    PERBAIKAN:
+    1) split kasar (punct + konjungsi)
+    2) aspek eksplisit (BASE_ROOT) -> pasti switch
+    3) jika tidak eksplisit:
+       - jika seed kuat (>=MIN_STRONG) -> boleh jadi aspek
+       - jika seed lemah -> jangan tentukan dulu (None)
+    4) forward-fill & backward-fill untuk None berdasarkan segmen kuat terdekat
     5) merge jika aspek sama
     """
     _, _, bigram, _, _, _ = load_resources()
@@ -801,8 +800,9 @@ def segment_text_merge_by_aspect(text: str, use_lexicon=False):
     if not chunks:
         return []
 
+    MIN_STRONG = 2  # minimal hit seed supaya dianggap kuat
+
     def explicit_aspect_from_tokens(tokens_plain):
-        # cek substring base_root (harganya -> harga, kemasannya -> kemas, dst)
         for tok in tokens_plain:
             r = _root_id(tok)
             for a in ASPEK:
@@ -810,47 +810,67 @@ def segment_text_merge_by_aspect(text: str, use_lexicon=False):
                     return a
         return None
 
-    segs = []
-    last_aspect = None
-
+    # ===== pass 1: buat list item dengan label awal (explicit > seed kuat > None) =====
+    items = []
     for ch in chunks:
         toks_plain = _simple_clean(ch).split()
         if use_lexicon:
             toks_plain = normalize_tokens_with_lexicon(toks_plain)
 
-        # hitung seed hits (buat info/debug, tapi tidak dipakai buat switch kalau bukan eksplisit)
-        asp_seed, hits = detect_aspect_simple(toks_plain)
-
         asp_explicit = explicit_aspect_from_tokens(toks_plain)
+
+        asp_seed, hits = detect_aspect_simple(toks_plain)
+        best_seed = hits.get(asp_seed, 0) if asp_seed else 0
 
         if asp_explicit is not None:
             asp = asp_explicit
-            last_aspect = asp_explicit
+            strong = True
         else:
-            # ✅ LANJUTAN KONTEN -> ikut aspek sebelumnya
-            if last_aspect is not None:
-                asp = last_aspect
-            else:
-                # awal teks tanpa kata aspek eksplisit -> pakai seed
+            if asp_seed is not None and best_seed >= MIN_STRONG:
                 asp = asp_seed
+                strong = True
+            else:
+                asp = None
+                strong = False
 
         toks_lda = tokenize_from_val(ch, bigram=bigram)
         if use_lexicon:
             toks_lda = normalize_tokens_with_lexicon(toks_lda)
 
-        item = {
+        items.append({
             "seg_text": ch.strip(),
             "tokens": toks_lda,
             "anchor_aspect": asp,
-            "seed_hits": hits
-        }
+            "seed_hits": hits,
+            "is_strong": strong
+        })
 
-        # merge kalau aspek sama
+    # ===== pass 2: forward fill (wariskan dari aspek kuat sebelumnya) =====
+    last_strong = None
+    for it in items:
+        if it["anchor_aspect"] is not None and it["is_strong"]:
+            last_strong = it["anchor_aspect"]
+        elif it["anchor_aspect"] is None and last_strong is not None:
+            it["anchor_aspect"] = last_strong
+
+    # ===== pass 3: backward fill (kalau awal None tapi setelahnya kuat) =====
+    next_strong = None
+    for i in range(len(items) - 1, -1, -1):
+        it = items[i]
+        if it["anchor_aspect"] is not None and it["is_strong"]:
+            next_strong = it["anchor_aspect"]
+        elif it["anchor_aspect"] is None and next_strong is not None:
+            it["anchor_aspect"] = next_strong
+
+    # ===== pass 4: merge jika aspek sama =====
+    segs = []
+    for it in items:
+        asp = it["anchor_aspect"]
         if segs and asp is not None and segs[-1]["anchor_aspect"] == asp:
-            segs[-1]["seg_text"] += " " + item["seg_text"]
-            segs[-1]["tokens"].extend(item["tokens"])
+            segs[-1]["seg_text"] += " " + it["seg_text"]
+            segs[-1]["tokens"].extend(it["tokens"])
         else:
-            segs.append(item)
+            segs.append(it)
 
     return segs
 

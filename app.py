@@ -618,8 +618,69 @@ def segment_text_merge_by_aspect(text: str, bigram, SEED_ROOTS, use_lexicon=Fals
             merged[-1]["tokens"].extend(item["tokens"])
         else:
             merged.append(item)
+    
+    # ✅ merge segmen terakhir jika tidak ada seed/base-root
+    merged = merge_last_segment_if_no_seed(
+        merged,
+        SEED_ROOTS=SEED_ROOTS,
+        use_lexicon=use_lexicon,
+        max_words=5
+    )
 
     return merged
+
+
+def has_aspect_evidence(tokens_plain, SEED_ROOTS):
+    """
+    Return True jika segmen punya bukti aspek:
+    - mengandung kata aspek eksplisit (BASE_ROOT)
+    - atau ada seed hits dari SEED_ROOTS
+    """
+    roots = {_root_id(t) for t in tokens_plain}
+
+    # (1) cek BASE_ROOT eksplisit
+    for r in roots:
+        for a in ASPEK:
+            if BASE_ROOT[a] in r:
+                return True
+
+    # (2) cek seed hits
+    for a in ASPEK:
+        if len(SEED_ROOTS[a] & roots) > 0:
+            return True
+
+    return False
+
+
+def merge_last_segment_if_no_seed(segs, SEED_ROOTS, use_lexicon=False, max_words=5):
+    """
+    Gabungkan segmen terakhir ke sebelumnya jika:
+    - segmen terakhir pendek (<= max_words)
+    - segmen terakhir TIDAK punya seed / base_root (tidak punya evidence aspek)
+    """
+    if not segs or len(segs) < 2:
+        return segs
+
+    last = segs[-1]
+    prev = segs[-2]
+
+    toks_plain = _simple_clean(last["seg_text"]).split()
+    if use_lexicon:
+        toks_plain = normalize_tokens_with_lexicon(toks_plain)
+
+    # kalau panjang -> jangan merge
+    if len(toks_plain) > max_words:
+        return segs
+
+    # kalau ada seed/base_root -> jangan merge
+    if has_aspect_evidence(toks_plain, SEED_ROOTS):
+        return segs
+
+    # ✅ merge ke segmen sebelumnya
+    prev["seg_text"] = prev["seg_text"].rstrip(" ,") + " " + last["seg_text"].lstrip(" ,")
+    prev["tokens"].extend(last["tokens"])
+
+    return segs[:-1]  # drop last
 
 def test_segmented_text(
     text,

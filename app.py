@@ -809,6 +809,15 @@ def segment_text_merge_by_aspect(text: str, use_lexicon=False):
 
         asp, hits = detect_aspect_simple(toks_plain)
 
+        roots = {_root_id(t) for t in toks_plain}
+        # anchor eksplisit (kemas/aroma/tekstur/harga/efek) ada?
+        has_explicit_anchor = any(BASE_ROOT[a] in r for r in roots for a in ASPEK)
+        best_score = hits.get(asp, 0) if asp is not None else 0
+
+        MIN_SEED_TO_SWITCH = 2  # <- ini kuncinya
+        if prev_aspect is not None and (not has_explicit_anchor) and best_score < MIN_SEED_TO_SWITCH:
+            asp = prev_aspect
+
         # kalau tidak terdeteksi aspek, wariskan dari sebelumnya (lanjutan konteks)
         if asp is None and prev_aspect is not None:
             asp = prev_aspect

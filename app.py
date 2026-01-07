@@ -475,6 +475,104 @@ def predict_aspect_boosted(
 
     return p_aspek, seed_hits, p_boost, aspect_final, aspect_top1_plain
 
+PUNCT_SPLIT_REGEX = r"[.!?;:]+"
+
+def split_by_punctuation(text: str):
+    text = str(text)
+    text = text.replace("\n", ". ")
+    parts = re.split(PUNCT_SPLIT_REGEX, text)
+    return [p.strip() for p in parts if p.strip()]
+
+CONJ_SPLIT_WORDS2 = {"tapi", "namun", "tetapi", "sedangkan", "walaupun", "meskipun", "cuma", "hanya"}
+
+def split_by_conjunction(seg: str):
+    toks = _simple_clean(seg).split()
+    if not toks:
+        return [seg]
+
+    for i, t in enumerate(toks):
+        if t in CONJ_SPLIT_WORDS2 and 0 < i < len(toks)-1:
+            left = " ".join(toks[:i]).strip()
+            right = " ".join(toks[i+1:]).strip()
+            out = []
+            if left:
+                out.append(left)
+            if right:
+                out.append(right)
+            return out
+
+    return [seg]
+
+def detect_aspect_by_seed(tokens):
+    _, _, _, _, _, SEED_ROOTS = load_resources()
+
+    roots = {_root_id(t) for t in tokens}
+    hits = {a: len(SEED_ROOTS[a] & roots) for a in ASPEK}
+
+    best_aspect = None
+    best_score = 0
+    for a, sc in hits.items():
+        if sc > best_score:
+            best_score = sc
+            best_aspect = a
+
+    if best_score == 0:
+        return None, hits
+    return best_aspect, hits
+
+def segment_text_aspect_aware(text: str, use_lexicon=False):
+    _, _, bigram, _, _, _ = load_resources()
+
+    # 1) split punctuation
+    rough = split_by_punctuation(text)
+
+    # 2) split conjunction
+    fine = []
+    for s in rough:
+        fine.extend(split_by_conjunction(s))
+
+    # 3) detect aspek tiap segmen (seed)
+    segs = []
+    for seg in fine:
+        toks = tokenize_from_val(seg, bigram=bigram)
+        if use_lexicon:
+            toks = normalize_tokens_with_lexicon(toks)
+
+        asp_seed, hits = detect_aspect_by_seed(toks)
+
+        segs.append({
+            "seg_text": seg.strip(),
+            "tokens": toks,
+            "anchor_aspect": asp_seed,
+            "seed_hits": hits
+        })
+
+    # 4) merge berurutan kalau aspek sama
+    merged = []
+    prev_asp = None
+
+    for item in segs:
+        asp = item["anchor_aspect"]
+
+        # kalau segmen ini tidak ada aspek tapi sebelumnya ada → anggap lanjutan
+        if asp is None and prev_asp is not None:
+            asp = prev_asp
+            item["anchor_aspect"] = asp
+
+        if not merged:
+            merged.append(item)
+            prev_asp = asp
+            continue
+
+        # merge kalau aspek sama
+        if asp == prev_asp and asp is not None:
+            merged[-1]["seg_text"] += " " + item["seg_text"]
+            merged[-1]["tokens"].extend(item["tokens"])
+        else:
+            merged.append(item)
+            prev_asp = asp
+
+    return merged
 
 CONJ_SPLIT_WORDS = {"tapi", "namun", "tetapi", "sedangkan", "walaupun", "meskipun"}
 
@@ -657,15 +755,13 @@ def test_segmented_text(
     """
     _, _, bigram, _, _, _ = load_resources()
 
-    seg_infos = segment_text_for_aspect(text, use_lexicon=use_lexicon)
+    seg_infos = segment_text_aspect_aware(text, use_lexicon=use_lexicon)
 
     labeled = []
     for info in seg_infos:
         seg = info["seg_text"]
         anchor = info.get("anchor_aspect", None)
-
-        toks_raw = tokenize_from_val(seg, bigram=bigram)
-        toks = normalize_tokens_with_lexicon(toks_raw) if use_lexicon else toks_raw
+        toks = info["tokens"]
 
         p_raw, hits, p_boost, aspect_pred, aspect_top1_plain = predict_aspect_boosted(
             toks,

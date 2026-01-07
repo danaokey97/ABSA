@@ -459,17 +459,44 @@ def detect_aspect_simple(tokens, SEED_ROOTS):
     return best_a, score
 
 
-def segment_text_merge_by_aspect(text: str, bigram, SEED_ROOTS, use_lexicon=False):
+def segment_text_merge_by_aspect(text: str, use_lexicon=False):
+    """
+    Segmentasi FINAL (pakai SEED_ROOTS dari seeds.json sebagai trigger)
+    1) split kasar (tanda baca + konjungsi)
+    2) kalau chunk mengandung kata aspek eksplisit (BASE_ROOT) -> switch ke aspek tsb
+    3) kalau tidak ada BASE_ROOT tapi ada seed aspect dominan -> switch ke aspek seed tsb
+       (KHUSUSNYA Efek yang sering tidak ditulis eksplisit)
+    4) kalau tidak ada seed -> WARISKAN aspek sebelumnya
+    5) merge jika aspek sama
+    """
+    _, _, bigram, _, _, SEED_ROOTS = load_resources()
+
     chunks = split_by_punct_and_conj(text)
     if not chunks:
         return []
 
     def explicit_aspect_from_tokens(tokens_plain):
+        """
+        Explicit trigger aspek:
+        - BASE_ROOT (harganya, teksturnya, aromanya, dll)
+        - Seed words dari seeds.json (SEED_ROOTS)
+        """
+
+        # 1) cek BASE_ROOT dulu (paling kuat)
         for tok in tokens_plain:
             r = _root_id(tok)
             for a in ASPEK:
                 if BASE_ROOT[a] in r:
                     return a
+
+        # 2) kalau tidak ada BASE_ROOT, cek seed hits
+        roots = {_root_id(t) for t in tokens_plain}
+        seed_scores = {a: len(SEED_ROOTS[a] & roots) for a in ASPEK}
+
+        best_a = max(seed_scores, key=seed_scores.get)
+        if seed_scores[best_a] > 0:
+            return best_a
+
         return None
 
     segs = []
@@ -480,17 +507,14 @@ def segment_text_merge_by_aspect(text: str, bigram, SEED_ROOTS, use_lexicon=Fals
         if use_lexicon:
             toks_plain = normalize_tokens_with_lexicon(toks_plain)
 
-        asp_seed, hits = detect_aspect_simple(toks_plain, SEED_ROOTS)
         asp_explicit = explicit_aspect_from_tokens(toks_plain)
 
         if asp_explicit is not None:
             asp = asp_explicit
             last_aspect = asp_explicit
         else:
-            if last_aspect is not None:
-                asp = last_aspect
-            else:
-                asp = asp_seed
+            # ✅ kalau tidak ada trigger seed / base root → wariskan aspek sebelumnya
+            asp = last_aspect
 
         toks_lda = tokenize_from_val(ch, bigram=bigram)
         if use_lexicon:
@@ -500,9 +524,10 @@ def segment_text_merge_by_aspect(text: str, bigram, SEED_ROOTS, use_lexicon=Fals
             "seg_text": ch.strip(),
             "tokens": toks_lda,
             "anchor_aspect": asp,
-            "seed_hits": hits
+            "seed_hits": {a: 0 for a in ASPEK}  # optional debug
         }
 
+        # merge kalau aspek sama
         if segs and asp is not None and segs[-1]["anchor_aspect"] == asp:
             segs[-1]["seg_text"] += " " + item["seg_text"]
             segs[-1]["tokens"].extend(item["tokens"])

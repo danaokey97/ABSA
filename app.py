@@ -504,10 +504,24 @@ def split_by_conjunction(seg: str):
     return [seg]
 
 def detect_aspect_by_seed(tokens):
+    """
+    Deteksi aspek:
+    1) lewat BASE_ROOT dulu (harga/aroma/tekstur/kemas/efek)
+    2) kalau tidak ketemu baru pakai seed
+    """
     _, _, _, _, _, SEED_ROOTS = load_resources()
 
-    roots = {_root_id(t) for t in tokens}
-    hits = {a: len(SEED_ROOTS[a] & roots) for a in ASPEK}
+    roots = [_root_id(t) for t in tokens]
+
+    # 1) cek BASE_ROOT (lebih kuat untuk 'harganya', 'aromanya')
+    for r in roots:
+        for a in ASPEK:
+            if BASE_ROOT[a] in r:
+                return a, {asp: 0 for asp in ASPEK}
+
+    # 2) cek seed
+    roots_set = set(roots)
+    hits = {a: len(SEED_ROOTS[a] & roots_set) for a in ASPEK}
 
     best_aspect = None
     best_score = 0
@@ -518,9 +532,19 @@ def detect_aspect_by_seed(tokens):
 
     if best_score == 0:
         return None, hits
+
     return best_aspect, hits
 
 def segment_text_aspect_aware(text: str, use_lexicon=False):
+    """
+    Segmentasi final:
+    1) split berdasarkan tanda baca
+    2) split berdasarkan konjungsi (tapi, namun, dll)
+    3) deteksi aspek per segmen pakai seed
+    4) merge segmen berturut-turut jika aspek sama
+       TAPI: kalau segmen dimulai konjungsi -> jangan merge
+    """
+
     _, _, bigram, _, _, _ = load_resources()
 
     # 1) split punctuation
@@ -535,6 +559,7 @@ def segment_text_aspect_aware(text: str, use_lexicon=False):
     segs = []
     for seg in fine:
         toks = tokenize_from_val(seg, bigram=bigram)
+
         if use_lexicon:
             toks = normalize_tokens_with_lexicon(toks)
 
@@ -543,12 +568,12 @@ def segment_text_aspect_aware(text: str, use_lexicon=False):
         segs.append({
             "seg_text": seg.strip(),
             "tokens": toks,
-            "anchor_aspect": asp_seed,
+            "anchor_aspect": asp_seed,   # boleh None
             "seed_hits": hits
         })
 
     # 4) merge berurutan kalau aspek sama
-        merged = []
+    merged = []
     prev_aspect = None
 
     for item in segs:
@@ -556,11 +581,12 @@ def segment_text_aspect_aware(text: str, use_lexicon=False):
         txt = item["seg_text"].strip()
         first_word = txt.split()[0] if txt.split() else ""
 
-        # ✅ RULE: kalau segmen dimulai konjungsi -> pasti segmen baru
+        # kalau segmen dimulai konjungsi -> pasti segmen baru
         starts_with_conj = first_word in CONJ_SPLIT_WORDS2
 
+        # RULE: kalau aspek None tapi bukan segmen konjungsi,
+        # dan sebelumnya punya aspek, maka diwariskan (lanjutan konteks)
         if asp is None and prev_aspect is not None and not starts_with_conj:
-            # hanya diwariskan kalau BUKAN konjungsi (lanjutan kalimat)
             asp = prev_aspect
             item["anchor_aspect"] = asp
 
@@ -569,13 +595,15 @@ def segment_text_aspect_aware(text: str, use_lexicon=False):
             prev_aspect = asp
             continue
 
-        # ✅ merge hanya jika aspek sama dan tidak dimulai konjungsi
+        # RULE merge: merge hanya jika aspek sama dan tidak diawali konjungsi
         if asp == prev_aspect and asp is not None and not starts_with_conj:
             merged[-1]["seg_text"] += " " + item["seg_text"]
             merged[-1]["tokens"].extend(item["tokens"])
         else:
             merged.append(item)
             prev_aspect = asp
+
+    return merged
 
 CONJ_SPLIT_WORDS = {"tapi", "namun", "tetapi", "sedangkan", "walaupun", "meskipun"}
 
@@ -759,7 +787,13 @@ def test_segmented_text(
     _, _, bigram, _, _, _ = load_resources()
 
     seg_infos = segment_text_aspect_aware(text, use_lexicon=use_lexicon)
-
+    if not seg_infos:
+    seg_infos = [{
+        "seg_text": text,
+        "anchor_aspect": None,
+        "tokens": tokenize_from_val(text, bigram=bigram),
+        "seed_hits": {a: 0 for a in ASPEK}
+    }]
     labeled = []
     for info in seg_infos:
         seg = info["seg_text"]

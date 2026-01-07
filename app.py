@@ -531,6 +531,8 @@ def detect_aspect_by_seed(tokens):
     return best_aspect, hits
 
 CONJ_WORDS = {"tapi", "namun", "tetapi", "sedangkan", "walaupun", "meskipun", "cuma", "hanya"}
+CONJ_TRIM = {"dan", "tapi", "namun", "tetapi", "sedangkan", "walaupun", "meskipun", "cuma", "hanya"}
+CONJ_BOUNDARY = {"tapi", "namun", "tetapi", "sedangkan", "walaupun", "meskipun"}  # yang bener2 pemisah klausa
 
 def segment_text_aspect_aware(text: str, use_lexicon=False):
     """
@@ -785,121 +787,153 @@ def detect_aspect_simple(tokens):
 
 def segment_text_merge_by_aspect(text: str, use_lexicon=False):
     """
-    FINAL (seed-only switch):
-    - switch segmen hanya saat menemukan seed aspek yang BERBEDA
-    - seed phrase (mis: mudah_resap) dideteksi via bigram/trigram (tanpa expand jadi 'mudah')
-    - konjungsi sebelum seed baru (mis: 'tapi') dipindah ke segmen kanan
-    - seg_text tampil bersih (tanpa underscore), underscore hanya dipakai internal untuk deteksi phrase
+    FINAL (sesuai logika kamu):
+    - Split ringan per kalimat (.,!,?) lalu split konjungsi kontras (tapi/namun/...)
+    - Cari anchor aspek dari seeds.json (termasuk multiword seed pakai underscore)
+    - Segmentasi hanya saat aspek anchor berubah (A -> B)
+    - Gap words di antara anchor otomatis nempel ke segmen sebelumnya (tidak jadi segmen sendiri)
     """
     _, _, bigram, _, SEED_DICT, _ = load_resources()
 
-    # ---- tokens plain untuk tampilan seg_text ----
-    plain = _simple_clean(text).split()
-    if use_lexicon:
-        plain = normalize_tokens_with_lexicon(plain)
-    if not plain:
+    # --- build seed phrase index (1-3 gram) ---
+    seed_phr = {a: {1: set(), 2: set(), 3: set()} for a in ASPEK}
+    for a in ASPEK:
+        for w in SEED_DICT[a]:
+            parts = [p for p in str(w).split("_") if p]
+            roots = tuple(_root_id(p) for p in parts)
+            L = len(roots)
+            if 1 <= L <= 3:
+                seed_phr[a][L].add(roots)
+
+    def _match_seed(roots, i):
+        # cek 3-gram lalu 2-gram lalu 1-gram (prioritas phrase lebih panjang)
+        for L in (3, 2, 1):
+            if i + L <= len(roots):
+                tup = tuple(roots[i:i+L])
+                for a in ASPEK:
+                    if tup in seed_phr[a][L]:
+                        return a, L
+        return None, 0
+
+    def _trim_edges(tokens):
+        # buang konjungsi/junk di ujung segmen
+        while tokens and _root_id(tokens[0]) in CONJ_TRIM:
+            tokens = tokens[1:]
+        while tokens and _root_id(tokens[-1]) in CONJ_TRIM:
+            tokens = tokens[:-1]
+        return tokens
+
+    # ---------- split kalimat: hanya . ! ? ----------
+    sents = split_into_sentences(text)
+    clauses = []
+    for s in sents:
+        toks = _simple_clean(s).split()
+        if use_lexicon:
+            toks = normalize_tokens_with_lexicon(toks)
+
+        if not toks:
+            continue
+
+        # split sekali berdasarkan konjungsi kontras (tapi/namun/...)
+        cut = None
+        for i, t in enumerate(toks):
+            if t in CONJ_BOUNDARY and 0 < i < len(toks) - 1:
+                cut = i
+                break
+
+        if cut is None:
+            clauses.append(" ".join(toks))
+        else:
+            left = " ".join(toks[:cut]).strip()
+            right = " ".join(toks[cut+1:]).strip()
+            if left:
+                clauses.append(left)
+            if right:
+                clauses.append(right)
+
+    if not clauses:
         return []
 
-    roots = [_root_id(t) for t in plain]
+    segs = []
+    last_aspect = None
 
-    # ---- seed exact (TIDAK expand underscore -> ini penting biar 'mudah' tidak ikut ke-trigger) ----
-    seed_exact = {
-        a: set(_root_id(w) for w in SEED_DICT[a])
-        for a in ASPEK
-    }
-
-    # ---- index token->aspek (kalau token masuk >1 aspek => ambiguous => ignore) ----
-    token2aspects = {}
-    for a in ASPEK:
-        for tok in seed_exact[a]:
-            token2aspects.setdefault(tok, set()).add(a)
-
-    def unique_aspect(token_key: str):
-        asp = token2aspects.get(token_key)
-        if asp and len(asp) == 1:
-            return next(iter(asp))
-        return None
-
-    # ---- deteksi event aspek per posisi token (prioritas trigram > bigram > unigram) ----
-    events = [None] * len(roots)
-    i = 0
-    while i < len(roots):
-        a = None
-
-        # trigram
-        if i + 2 < len(roots):
-            tri = f"{roots[i]}_{roots[i+1]}_{roots[i+2]}"
-            a = unique_aspect(tri)
-            if a is not None:
-                events[i] = a
-                i += 3
-                continue
-
-        # bigram
-        if i + 1 < len(roots):
-            bi = f"{roots[i]}_{roots[i+1]}"
-            a = unique_aspect(bi)
-            if a is not None:
-                events[i] = a
-                i += 2
-                continue
-
-        # unigram
-        a = unique_aspect(roots[i])
-        if a is not None:
-            events[i] = a
-
-        i += 1
-
-    # ---- bentuk segmen: cut hanya ketika event aspek berubah ----
-    segments = []
-    buf_tokens = []
-    active = None
-
-    def flush_buffer(aspek):
-        txt = " ".join(buf_tokens).strip()
-        if not txt:
-            return
-        toks_lda = tokenize_from_val(txt, bigram=bigram)  # boleh bigram utk LDA
+    for cl in clauses:
+        toks_plain = _simple_clean(cl).split()
         if use_lexicon:
-            toks_lda = normalize_tokens_with_lexicon(toks_lda)
+            toks_plain = normalize_tokens_with_lexicon(toks_plain)
 
-        # seed_hits hanya untuk info/debug (tidak dipakai switch)
-        # pakai detect_aspect_simple yg seed-only (punya kamu) agar konsisten
-        _, hits, _ = detect_aspect_simple(_simple_clean(txt).split())
+        toks_plain = _trim_edges(toks_plain)
+        if not toks_plain:
+            continue
 
-        segments.append({
-            "seg_text": txt,              # ✅ bersih tanpa underscore
-            "tokens": toks_lda,           # ✅ token LDA
-            "anchor_aspect": aspek,       # ✅ hasil segmentasi seed
-            "seed_hits": hits
-        })
+        roots = [_root_id(t) for t in toks_plain]
 
-    i = 0
-    while i < len(plain):
-        a_tok = events[i]
+        # --- cari anchors (pos, aspek) berdasarkan seed phrase ---
+        anchors = []
+        i = 0
+        while i < len(roots):
+            a, L = _match_seed(roots, i)
+            if a is not None:
+                anchors.append((i, a))
+                i += L
+            else:
+                i += 1
 
-        if a_tok is not None:
-            if active is None:
-                active = a_tok
-            elif a_tok != active:
-                # pindahkan konjungsi dari akhir segmen kiri ke awal segmen kanan
-                moved = []
-                while buf_tokens and _root_id(buf_tokens[-1]) in CONJ_WORDS:
-                    moved.append(buf_tokens.pop())
-                moved = list(reversed(moved))
+        # compress anchor berurutan aspek sama
+        comp = []
+        for pos, a in anchors:
+            if not comp or comp[-1][1] != a:
+                comp.append((pos, a))
 
-                flush_buffer(active)
+        # === kalau tidak ada anchor: nempel ke aspek sebelumnya (jangan bikin segmen baru yg random) ===
+        if not comp:
+            if segs and last_aspect is not None:
+                segs[-1]["seg_text"] += " " + " ".join(toks_plain)
+                segs[-1]["tokens"].extend(tokenize_from_val(" ".join(toks_plain), bigram=bigram))
+            else:
+                lda_tokens = tokenize_from_val(" ".join(toks_plain), bigram=bigram)
+                if use_lexicon:
+                    lda_tokens = normalize_tokens_with_lexicon(lda_tokens)
+                segs.append({
+                    "seg_text": " ".join(toks_plain),
+                    "tokens": lda_tokens,
+                    "anchor_aspect": None,
+                    "seed_hits": {a: 0 for a in ASPEK}
+                })
+            continue
 
-                buf_tokens = moved[:]  # konjungsi masuk segmen baru
-                active = a_tok
+        # === bentuk segmen sebagai span anchor->anchor berikutnya (prefix ikut segmen pertama) ===
+        for idx, (pos, asp) in enumerate(comp):
+            start = 0 if idx == 0 else pos
+            end = comp[idx + 1][0] if idx + 1 < len(comp) else len(toks_plain)
+            seg_tokens = toks_plain[start:end]
+            seg_tokens = _trim_edges(seg_tokens)
+            if not seg_tokens:
+                continue
 
-        buf_tokens.append(plain[i])
-        i += 1
+            seg_text = " ".join(seg_tokens).strip()
 
-    flush_buffer(active)
+            lda_tokens = tokenize_from_val(seg_text, bigram=bigram)
+            if use_lexicon:
+                lda_tokens = normalize_tokens_with_lexicon(lda_tokens)
 
-    return segments
+            item = {
+                "seg_text": seg_text,
+                "tokens": lda_tokens,
+                "anchor_aspect": asp,
+                "seed_hits": {a: 0 for a in ASPEK}
+            }
+
+            # merge kalau aspek sama
+            if segs and segs[-1]["anchor_aspect"] == asp:
+                segs[-1]["seg_text"] += " " + item["seg_text"]
+                segs[-1]["tokens"].extend(item["tokens"])
+            else:
+                segs.append(item)
+
+            last_aspect = asp
+
+    return segs
 
 def test_segmented_text(
     text,

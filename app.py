@@ -13,28 +13,48 @@ from wordcloud import WordCloud
 from gensim.corpora import Dictionary
 from gensim.models.ldamodel import LdaModel
 
+
 # =====================================================
 # PATH – DISKONFIG SESUAI FOLDER ABSA
 # =====================================================
-st.set_page_config(page_title="ABSA – LDA + Logistic Regression", layout="wide")
+st.set_page_config(page_title="ABSA – LDA + logrec", layout="wide")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT        = os.path.join(BASE_DIR, "MODEL_LDA_5ASPEK_NEW")
 MODEL_DIR   = os.path.join(ROOT, "Model_LDA")
 ARTEFAK_DIR = os.path.join(ROOT, "artefak")
 SENT_MODEL_DIR = os.path.join(BASE_DIR, "MODEL")
 
-# === FILE LEXICON (SESUAIKAN NAMA FILE DI SINI) ===
-SLANG_FILE      = os.path.join(BASE_DIR, "kamus_slang.txt")   # TODO: sesuaikan
-KATADASAR_FILE  = os.path.join(BASE_DIR, "kata_dasar.txt")   # TODO: sesuaikan
-
 ASPEK = ["Kemasan", "Aroma", "Tekstur", "Harga", "Efek"]
 
 # =====================================================
-# UTIL PREPROCESSING DASAR
+# UTIL PREPROCESSING
 # =====================================================
+def split_clitics_id(text: str) -> str:
+    """
+    Pisahkan klitik bahasa Indonesia: -nya, -ku, -mu
+    contoh: 'harganya' -> 'harga nya'
+    """
+    t = str(text).lower()
+    t = re.sub(r"([a-z0-9_]+)(nya|ku|mu)\b", r"\1 \2", t)
+    return t
+    
+def join_clitics_id(text: str) -> str:
+    """
+    Gabungkan kembali klitik untuk DISPLAY
+    contoh: 'aroma nya' -> 'aromanya'
+    """
+    return re.sub(r"\b([a-z0-9_]+)\s+(nya|ku|mu)\b", r"\1\2", text)
+
+
+def normalize_text(text: str) -> str:
+    t = _simple_clean(text)
+    t = split_clitics_id(t)
+    return t
+
 
 def _simple_clean(text: str) -> str:
     t = str(text).lower()
+    t = t.replace("enggak", "gak").replace("nggak", "gak")
     return re.sub(r"[^a-z0-9_ ]+", " ", t)
 
 def _root_id(token: str) -> str:
@@ -44,10 +64,6 @@ def _root_id(token: str) -> str:
     return t
 
 def tokenize_from_val(val, bigram=None):
-    """
-    Tokenisasi 'standar' untuk korpus LDA (tanpa lexicon).
-    Dipakai di jalur dataset (bukan ulasan tunggal dengan lexicon).
-    """
     if isinstance(val, list):
         toks = [str(t) for t in val if t]
     else:
@@ -75,12 +91,11 @@ def split_into_sentences(text: str):
     sentences = []
 
     for line in lines:
-        # ✅ HANYA split . ! ?
-        parts = re.split(r"([.!?])", line)
+        parts = re.split(r"([.,!?])", line)
         buf = ""
 
         for part in parts:
-            if part in [".", "!", "?"]:
+            if part in [".", "!", "?", ","]:
                 buf += part
                 if buf.strip():
                     sentences.append(buf.strip())
@@ -92,147 +107,6 @@ def split_into_sentences(text: str):
             sentences.append(buf.strip())
 
     return sentences
-
-# =====================================================
-# LEXICON: SLANG & KATA DASAR UNTUK PREPROSES SINGLE TEXT
-# =====================================================
-
-@st.cache_resource
-def load_lexicons():
-    """
-    Load slang dictionary saja (tanpa kata dasar).
-    Format slang yang didukung:
-    1) TXT/CSV biasa, satu pasangan per baris:
-         ga, tidak
-         gk\t tidak
-    2) Potongan dictionary/JSON:
-         "ga": "tidak", "gk": "tidak", ...
-    """
-    slang_dict = {}
-
-    # ================== LOAD SLANG ==================
-    if os.path.exists(SLANG_FILE):
-        with open(SLANG_FILE, "r", encoding="utf-8") as f:
-            content = f.read()
-
-        # --- Mode 2: pattern "slang": "baku" ---
-        pair_pattern = re.compile(r'"([^"]+)"\s*:\s*"([^"]+)"')
-        for s, n in pair_pattern.findall(content):
-            slang_dict[s.strip().lower()] = n.strip().lower()
-
-        # --- Mode 1: satu pasangan per baris, dipisah koma / TAB ---
-        for raw_line in content.splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#"):
-                continue
-
-            if ":" in line and '"' in line:
-                continue
-
-            if "," in line:
-                s, n = [p.strip().lower() for p in line.split(",", 1)]
-            elif "\t" in line:
-                s, n = [p.strip().lower() for p in line.split("\t", 1)]
-            else:
-                continue
-
-            if s and n:
-                slang_dict[s] = n
-
-    # --- Fallback wajib: pastikan kata ini SELALU ada ---
-    forced_pairs = {
-        "ga": "tidak",
-        "g": "tidak",
-        "gak": "tidak",
-        "gk": "tidak",
-        "enggak": "tidak",
-        "nggak": "tidak",
-    }
-    for s, n in forced_pairs.items():
-        slang_dict.setdefault(s, n)
-
-    return slang_dict
-
-
-def _normalize_repeated_chars(token: str, max_repeat: int = 2) -> str:
-    """
-    Contoh: 'bangett' -> 'banget', 'lucu bangeeet' -> 'lucu banget'
-    """
-    return re.sub(r"(.)\1{%d,}" % max_repeat, r"\1" * max_repeat, token)
-
-def _lemmatize_token_with_katadasar(token: str, kata_dasar: set) -> str:
-    """
-    Lematisasi ringan berbasis kata_dasar.
-    Heuristik sederhana saja.
-    """
-    t = _normalize_repeated_chars(token)
-
-    if t in kata_dasar:
-        return t
-
-    suffixes = ["nya", "in", "kan", "lah", "ku", "mu"]
-    for suf in suffixes:
-        if t.endswith(suf) and len(t) > len(suf) + 2:
-            base = t[:-len(suf)]
-            if base in kata_dasar:
-                return base
-
-    return t
-
-def normalize_tokens_with_lexicon(tokens):
-    """
-    Normalisasi token dengan slang saja (tanpa kata_dasar).
-    Dipakai untuk ulasan tunggal (segmentasi + sentimen) jika use_lexicon=True.
-    """
-    slang_dict = load_lexicons()
-
-    norm_tokens = []
-    for tok in tokens:
-        t = tok.lower().strip()
-        if not t:
-            continue
-
-        # 🔒 WAJIB: semua variasi 'ga' selalu jadi 'tidak'
-        if t in {"ga", "gak", "gk", "engga", "enggak", "nggak", "g"}:
-            t = "tidak"
-        else:
-            t = slang_dict.get(t, t)
-
-        norm_tokens.append(t)
-
-    return norm_tokens
-
-def _apply_negation_rules(tokens):
-    """
-    - Jika (NEG_WORD + kata) ada di POLAR_SWAP → ganti dengan antonim.
-      contoh: tidak mahal -> murah
-    - Jika tidak ada di POLAR_SWAP → biarkan apa adanya (tidak bikin *_neg).
-    """
-    new_tokens = []
-    skip_next = False
-
-    for i, t in enumerate(tokens):
-        if skip_next:
-            skip_next = False
-            continue
-
-        if t in NEG_WORDS and i + 1 < len(tokens):
-            nxt = tokens[i + 1]
-
-            if nxt in POLAR_SWAP:
-                # Ada antonim di kamus → pakai antonim
-                new_tokens.append(POLAR_SWAP[nxt])
-                skip_next = True
-            else:
-                # Tidak ada di kamus → simpan kata negasi dan kata aslinya
-                new_tokens.append(t)
-                # boleh juga tambahkan nxt, kalau mau:
-                # new_tokens.append(nxt)
-                skip_next = False   # kita tidak skip kata berikut
-        else:
-            new_tokens.append(t)
-
-    return new_tokens
 
 # =====================================================
 # LOAD RESOURCES LDA (dictionary, lda, mapping, seeds)
@@ -257,10 +131,10 @@ def load_resources():
 
     SEED_DICT = {
         "Kemasan": set(sj.get("Kemasan", [])),
-        "Aroma":   set(sj.get("Aroma", [])),
+        "Aroma": set(sj.get("Aroma", [])),
         "Tekstur": set(sj.get("Tekstur", [])),
-        "Harga":   set(sj.get("Harga", [])),
-        "Efek":    set(sj.get("Efek", [])),
+        "Harga": set(sj.get("Harga", [])),
+        "Efek": set(sj.get("Efek", [])),
     }
 
     SEED_ROOTS = {
@@ -275,17 +149,11 @@ def load_resources():
     return dictionary, lda, bigram, topic2aspect, SEED_DICT, SEED_ROOTS
 
 # =====================================================
-# LOAD SENTIMENT MODELS (Logistic Regression)
+# LOAD logrec MODELS
 # =====================================================
 
 @st.cache_resource
 def load_sentiment_models():
-    """
-    Load model sentimen per aspek:
-    - logreg_kemasan.pkl, tfidf_kemasan.pkl
-    - logreg_aroma.pkl, tfidf_aroma.pkl
-    - dst.
-    """
     models = {}
 
     for aspek in ASPEK:
@@ -304,41 +172,17 @@ def load_sentiment_models():
 
     return models
 
-def gabung_negasi(text: str) -> str:
-    """
-    Gabungkan negasi + 1 kata setelahnya menjadi satu token dengan underscore.
-    Contoh: 'tidak kasar' -> 'tidak_kasar'
-    Ini harus konsisten dengan training LogReg kamu.
-    """
-    t = str(text).lower()
+def preprocess_for_sentiment(text: str) -> str:
+    t = normalize_text(text)
+    return " ".join(t.split())
 
-    neg = r"(tidak|ga|gak|nggak|enggak|tak|tdk|bukan|kurang|gk|g)"
-    t = re.sub(rf"\b{neg}\s+(\w+)\b", r"\1_\2", t)
 
-    return t
-
-def preprocess_for_sentiment(text: str, use_lexicon: bool = False) -> str:
-    cleaned = _simple_clean(text)
-    tokens = cleaned.split()
-
-    if use_lexicon:
-        tokens = normalize_tokens_with_lexicon(tokens)
-        tokens = _apply_negation_rules(tokens)
-
-    out = " ".join(tokens)
-
-    # ✅ gabung negasi hanya jika memang ada kata negasi
-    if re.search(r"\b(tidak|ga|gak|nggak|enggak|tak|tdk|bukan|kurang|gk|g)\b", out):
-        out = gabung_negasi(out)
-
-    return out
-
-def predict_sentiment_for_segment(seg_text: str, aspek: str, sent_models: dict, use_lexicon: bool = False):
+def predict_sentiment_for_segment(seg_text: str, aspek: str, sent_models: dict):
     if aspek not in sent_models:
         return None, None
 
     clf, vec = sent_models[aspek]
-    X = vec.transform([preprocess_for_sentiment(seg_text, use_lexicon=use_lexicon)])
+    X = vec.transform([preprocess_for_sentiment(seg_text)])
 
     y_pred = clf.predict(X)[0]
 
@@ -353,42 +197,12 @@ def predict_sentiment_for_segment(seg_text: str, aspek: str, sent_models: dict, 
 # =====================================================
 # FUNGSI INTI: DETEKSI ASPEK + SEGMENTASI (LDA)
 # =====================================================
-# =====================================================
-#  NEGATION HANDLING (untuk ulasan tunggal + sentimen)
-# =====================================================
-
-NEG_WORDS = {"ga", "gak", "gk", "tidak", "enggak", "nggak","g"}
-
-# Kamus antonim sederhana untuk kata-kata yang sering muncul di ulasan
-# (bisa kamu tambah sendiri kapan saja)
-POLAR_SWAP = {
-    # Harga
-    "mahal": "murah",
-    "murah": "mahal",
-
-    # Kesan umum
-    "bagus": "jelek",
-    "jelek": "bagus",
-    "buruk": "bagus",
-    "oke"  : "tidak_oke",
-
-    # Tekstur
-    "berat": "ringan",
-    "ringan": "berat",
-    "lengket": "tidak_lengket",
-
-    # Efek
-    "perih": "nyaman",
-    "iritasi": "nyaman",
-    "jerawatan": "tidak_jerawatan",  # contoh: "tidak jerawatan" -> netral/positif
-}
-
 
 SEGMENT_STOPWORDS = {
-    "tidak", "gak", "nggak", "enggak", "ga","g",
-    "banget", "aja", "sih", "dong", "kok",
-    "dan", "atau", "yang", "itu", "ini",
-    "enak", "dipake", "pake", "nyaman", "kurang"
+    "tidak", "gak", "nggak", "enggak", "ga",
+    "banget", "aja", "sih", "dong", "kok", "walaupun"
+    "dan", "atau", "yang", "itu", "ini","namun",
+    "enak", "dipake", "pake", "nyaman", "kurang","tapi"
 }
 
 BASE_ROOT = {
@@ -455,485 +269,184 @@ def predict_aspect_boosted(
     Z = sum(p_boost.values()) or 1.0
     p_boost = {a: v / Z for a, v in p_boost.items()}
 
-    # fallback: kalau semua kecil dan tidak ada seed → anggap Efek (umum)
-    if max(p_boost.values()) < 0.35 and sum(seed_hits.values()) == 0:
-        aspect_final = "Efek"
+    if prefer_seed_for_top1 and any(h > 0 for h in seed_hits.values()):
+        seeded_aspects = [a for a, h in seed_hits.items() if h > 0]
+        aspect_final = max(seeded_aspects, key=lambda a: p_boost[a])
     else:
-        if prefer_seed_for_top1 and any(h > 0 for h in seed_hits.values()):
-            seeded_aspects = [a for a, h in seed_hits.items() if h > 0]
-            aspect_final = max(seeded_aspects, key=lambda a: p_boost[a])
-        else:
-            aspect_final = max(p_boost, key=p_boost.get)
+        aspect_final = max(p_boost, key=p_boost.get)
 
     aspect_top1_plain = max(p_boost, key=p_boost.get)
 
     return p_aspek, seed_hits, p_boost, aspect_final, aspect_top1_plain
 
-PUNCT_SPLIT_REGEX = r"[.!?;:]+"
 
-def split_by_punctuation(text: str):
-    text = str(text)
-    text = text.replace("\n", ". ")
-    parts = re.split(PUNCT_SPLIT_REGEX, text)
-    return [p.strip() for p in parts if p.strip()]
-
-CONJ_SPLIT_WORDS2 = {"tapi", "namun", "tetapi", "sedangkan", "walaupun", "meskipun", "cuma", "hanya"}
-
-def split_by_conjunction(seg: str):
-    toks = _simple_clean(seg).split()
-    if not toks:
-        return [seg]
-
-    for i, t in enumerate(toks):
-        if t in CONJ_SPLIT_WORDS2 and 0 < i < len(toks)-1:
-            left = " ".join(toks[:i]).strip()
-            right = " ".join(toks[i+1:]).strip()
-            out = []
-            if left:
-                out.append(left)
-            if right:
-                out.append(right)
-            return out
-
-    return [seg]
-
-def detect_aspect_by_seed(tokens):
-    """
-    Deteksi aspek dari tokens:
-    1) BASE_ROOT (harga/aroma/tekstur/kemas/efek) untuk menangkap "harganya", "aromanya"
-    2) SEED_ROOTS (seeds.json)
-    Return: (best_aspect or None, hits_per_aspect)
-    """
-    _, _, _, _, _, SEED_ROOTS = load_resources()
-
-    roots = [_root_id(t) for t in tokens]
-    roots_set = set(roots)
-
-    # 1) BASE_ROOT dulu
-    for r in roots:
-        for a in ASPEK:
-            if BASE_ROOT[a] in r:
-                return a, {asp: 0 for asp in ASPEK}
-
-    # 2) Seed hits
-    hits = {a: len(SEED_ROOTS[a] & roots_set) for a in ASPEK}
-
-    best_aspect = None
-    best_score = 0
-    for a, sc in hits.items():
-        if sc > best_score:
-            best_score = sc
-            best_aspect = a
-
-    if best_score == 0:
-        return None, hits
-
-    return best_aspect, hits
-
-CONJ_WORDS = {"tapi", "namun", "tetapi", "sedangkan", "walaupun", "meskipun", "cuma", "hanya"}
-CONJ_TRIM = {"dan", "tapi", "namun", "tetapi", "sedangkan", "walaupun", "meskipun", "cuma", "hanya"}
-CONJ_BOUNDARY = {"tapi", "namun", "tetapi", "sedangkan", "walaupun", "meskipun"}  # yang bener2 pemisah klausa
-
-def segment_text_aspect_aware(text: str, use_lexicon=False):
-    """
-    Segmentasi RULE-BASED sesuai maumu:
-    - potong segmen hanya jika ditemukan aspek baru (seed/base-root) yang BEDA
-    - bigram phraser dipakai hanya untuk tokens LDA (bukan untuk tampilan segmen & sentimen)
-    - buang konjungsi yang nyangkut di akhir segmen kiri (mis. "aroma tapi")
-    """
-    _, _, bigram, _, _, _ = load_resources()
-
-    # --- tokens "plain" untuk menentukan batas segmen (tanpa bigram, tanpa underscore)
-    plain_tokens = _simple_clean(text).split()
-    if use_lexicon:
-        plain_tokens = normalize_tokens_with_lexicon(plain_tokens)
-
-    if not plain_tokens:
-        return []
-
-    # helper: aspek per token (base_root/seed roots)
-    def aspect_of_token(tok: str):
-        _, _, _, _, _, SEED_ROOTS = load_resources()
-        r = _root_id(tok)
-
-        # base_root
-        for a in ASPEK:
-            if BASE_ROOT[a] in r:
-                return a
-
-        # seed
-        for a in ASPEK:
-            if r in SEED_ROOTS[a]:
-                return a
-
-        return None
-
-    segments = []
-    start = 0
-    current_aspect = None
-
-    for i, tok in enumerate(plain_tokens):
-        a_tok = aspect_of_token(tok)
-
-        if current_aspect is None and a_tok is not None:
-            current_aspect = a_tok
-
-        # jika ketemu aspek baru yang beda -> CUT
-        if a_tok is not None and current_aspect is not None and a_tok != current_aspect:
-            cut = i
-
-            # buang konjungsi di ujung kiri segmen (contoh: "... aroma tapi | harga ...")
-            while cut > start and plain_tokens[cut - 1] in CONJ_JUNK:
-                cut -= 1
-
-            left_tokens = plain_tokens[start:cut]
-            left_text = " ".join(left_tokens).strip()
-
-            if left_text:
-                # tokens untuk LDA boleh pakai bigram
-                lda_tokens = tokenize_from_val(left_text, bigram=bigram)
-                if use_lexicon:
-                    lda_tokens = normalize_tokens_with_lexicon(lda_tokens)
-
-                anchor, hits = detect_aspect_by_seed(left_tokens)
-                if anchor is None:
-                    anchor = current_aspect
-
-                segments.append({
-                    "seg_text": left_text,         # ✅ tampil bersih (tanpa underscore)
-                    "tokens": lda_tokens,          # ✅ untuk LDA boleh bigram
-                    "anchor_aspect": anchor,
-                    "seed_hits": hits
-                })
-
-            start = i
-            current_aspect = a_tok
-
-    # segmen terakhir
-    last_tokens = plain_tokens[start:]
-    last_text = " ".join(last_tokens).strip()
-
-    if last_text:
-        lda_tokens = tokenize_from_val(last_text, bigram=bigram)
-        if use_lexicon:
-            lda_tokens = normalize_tokens_with_lexicon(lda_tokens)
-
-        anchor, hits = detect_aspect_by_seed(last_tokens)
-        if anchor is None:
-            anchor = current_aspect
-
-        segments.append({
-            "seg_text": last_text,
-            "tokens": lda_tokens,
-            "anchor_aspect": anchor,
-            "seed_hits": hits
-        })
-
-    return segments
-
-
-CONJ_SPLIT_WORDS = {"tapi", "namun", "tetapi", "sedangkan", "walaupun", "meskipun"}
-
-def segment_text_for_aspect(text: str, use_lexicon=False):
-    """
-    Segmentasi berdasarkan anchor aspek (BASE_ROOT/SEED_ROOTS).
-    Output segmen besar: dari anchor ke anchor berikutnya.
-    """
-
-    _, _, bigram, _, _, SEED_ROOTS = load_resources()
-
+def segment_text_for_aspect(text: str):
     sentences = split_into_sentences(text)
     segments = []
 
-    def token_aspect(tok: str):
-        r = _root_id(_simple_clean(tok))
-        if not r or r in SEGMENT_STOPWORDS:
-            return None
-
-        # BASE_ROOT dulu
-        for a in ASPEK:
-            if BASE_ROOT[a] in r:
-                return a
-
-        # seed
-        for a in ASPEK:
-            if r in SEED_ROOTS[a]:
-                return a
-
-        return None
-
+    # --- 1) Segmentasi awal per kalimat + anchor BASE_ROOT + 'cocok' ---
     for sent in sentences:
-        toks_plain = _simple_clean(sent).split()
-        if use_lexicon:
-            toks_plain = normalize_tokens_with_lexicon(toks_plain)
-        if not toks_plain:
+        cleaned = _simple_clean(sent)
+        cleaned = split_clitics_id(cleaned)
+        tokens = cleaned.split()
+
+
+
+        if not tokens:
             continue
 
-        # cari anchor posisi aspek
-        anchors = []
-        for i, t in enumerate(toks_plain):
-            a = token_aspect(t)
-            if a is not None:
-                # compress anchor berurutan aspek sama
-                if not anchors or anchors[-1][1] != a:
-                    anchors.append((i, a))
+        anchor_list = []
+        for idx, tok in enumerate(tokens):
+            root = _root_id(_simple_clean(tok))
 
-        # kalau tidak ada anchor -> segmen umum
-        if not anchors:
-            segments.append({"seg_text": " ".join(toks_plain), "anchor_aspect": None})
+            anchored = False
+            for aspek in ASPEK:
+                base = BASE_ROOT[aspek]
+                if base in root:
+                    start_pos = idx
+                    if idx > 0:
+                        prev_root = _root_id(_simple_clean(tokens[idx - 1]))
+                        if prev_root == "segi":
+                            start_pos = idx - 1
+                    anchor_list.append((start_pos, aspek))
+                    anchored = True
+                    break
+
+
+
+
+        if not anchor_list:
+            seg_text = sent.strip()
+            segments.append({
+                "seg_text": seg_text,
+                "seg_text_model": normalize_text(seg_text),
+                "anchor_aspect": None
+            })
+
             continue
 
-        # kalau ada anchor -> potong dari anchor ke anchor berikutnya
-        for idx, (pos, asp) in enumerate(anchors):
-            end = anchors[idx + 1][0] if idx + 1 < len(anchors) else len(toks_plain)
-            seg_tokens = toks_plain[pos:end]
-            seg_text = " ".join(seg_tokens).strip()
+        compressed = []
+        for pos, asp in sorted(anchor_list, key=lambda x: x[0]):
+            if not compressed or compressed[-1][1] != asp:
+                compressed.append((pos, asp))
+
+        prev_end = 0
+        for i, (pos, asp) in enumerate(compressed):
+            if prev_end < pos:
+                seg_tokens = tokens[prev_end:pos]
+                seg_text = " ".join(seg_tokens).strip(" ,")
+                if seg_text:
+                    segments.append({
+                        "seg_text": seg_text,
+                        "seg_text_model": normalize_text(seg_text),
+                        "anchor_aspect": None
+                    })
+
+
+            end = compressed[i + 1][0] if i + 1 < len(compressed) else len(tokens)
+            seg_tokens = tokens[pos:end]
+            seg_text = " ".join(seg_tokens).strip(" ,")
             if seg_text:
-                segments.append({"seg_text": seg_text, "anchor_aspect": asp})
+                segments.append({
+                "seg_text": seg_text,
+                "seg_text_model": normalize_text(seg_text),
+                "anchor_aspect": asp
+            })
 
-    # attach segmen tanpa anchor ke segmen anchor terdekat (lanjutan)
+
+            prev_end = end
+
+    # --- 2) Refinement ekor segmen milik aspek berikutnya ---
+    refined = []
+    BACK_WINDOW = 4
+
+    i = 0
+    while i < len(segments):
+        curr = segments[i]
+
+        if i < len(segments) - 1:
+            nxt = segments[i + 1]
+            a1 = curr.get("anchor_aspect", None)
+            a2 = nxt.get("anchor_aspect", None)
+
+            if a1 is not None and a2 is not None and a1 != a2:
+                orig_tokens = curr["seg_text"].split()
+                split_idx = None
+
+                for j, tok in enumerate(orig_tokens):
+                    asp_tok = detect_aspect_from_token(tok)
+                    if asp_tok == a2:
+                        split_idx = max(0, j - BACK_WINDOW)
+                        break
+
+                if split_idx is not None and 0 < split_idx < len(orig_tokens) - 1:
+                    left_text  = " ".join(orig_tokens[:split_idx]).strip(" ,")
+                    right_head = " ".join(orig_tokens[split_idx:]).strip(" ,")
+
+                    if left_text:
+                        refined.append({
+                            "seg_text": left_text,
+                            "anchor_aspect": a1
+                        })
+
+                    combined_text = (right_head + " " + nxt["seg_text"]).strip()
+
+                    refined.append({
+                        "seg_text": combined_text,
+                        "anchor_aspect": a2
+                    })
+
+                    i += 2
+                    continue
+
+        refined.append(curr)
+        i += 1
+
+    # --- 3) Gabungkan segmen tanpa anchor ---
     attached = []
-    last_anchor = None
-    for s in segments:
-        if s["anchor_aspect"] is not None:
-            attached.append(s)
-            last_anchor = s["anchor_aspect"]
+    seen_anchor = False
+
+    i = 0
+    while i < len(refined):
+        curr = refined[i]
+        asp_curr = curr.get("anchor_aspect", None)
+
+        if asp_curr is not None:
+            combined_text = curr["seg_text"]
+            j = i + 1
+            while j < len(refined) and refined[j].get("anchor_aspect") is None:
+                combined_text += " " + refined[j]["seg_text"]
+                j += 1
+
+            attached.append({
+                "seg_text": combined_text.strip(),
+                "anchor_aspect": asp_curr,
+            })
+            seen_anchor = True
+            i = j
         else:
-            # kalau ada anchor sebelumnya, attach ke dia
-            if last_anchor is not None and attached:
-                attached[-1]["seg_text"] += " " + s["seg_text"]
+            tokens = curr["seg_text"].split()
+            if (
+                not seen_anchor
+                and len(tokens) <= 4
+                and i < len(refined) - 1
+                and refined[i + 1].get("anchor_aspect") is not None
+            ):
+                nxt = refined[i + 1]
+                combined_text = curr["seg_text"] + " " + nxt["seg_text"]
+
+                attached.append({
+                    "seg_text": combined_text.strip(),
+                    "anchor_aspect": nxt["anchor_aspect"],
+                })
+                seen_anchor = True
+                i = i + 2
             else:
-                attached.append(s)
-
-    # buat tokens LDA untuk tiap segmen (pakai bigram disini saja)
-    out = []
-    for s in attached:
-        seg_text = s["seg_text"]
-        toks = tokenize_from_val(seg_text, bigram=bigram)
-        if use_lexicon:
-            toks = normalize_tokens_with_lexicon(toks)
-
-        out.append({
-            "seg_text": seg_text,
-            "tokens": toks,
-            "anchor_aspect": s["anchor_aspect"],
-        })
-
-    return out
-CONJ_SPLIT_WORDS = {
-    "tapi", "namun", "tetapi", "sedangkan",
-    "walaupun", "meskipun", "cuma", "hanya"
-}
-
-def split_by_punct_and_conj(text: str):
-    """
-    Split kasar:
-    - tanda baca: . ! ? ; :
-    - konjungsi: tapi/namun/dst (konjungsi dibuang)
-    Koma tidak memotong.
-    """
-    text = str(text).replace("\n", ". ")
-    # split tanda baca dulu
-    parts = re.split(r"[.!?;:]+", text)
-    parts = [p.strip() for p in parts if p.strip()]
-
-    out = []
-    for p in parts:
-        toks = _simple_clean(p).split()
-        if not toks:
-            continue
-
-        # split sekali pada konjungsi pertama yang ketemu
-        cut = None
-        for i, t in enumerate(toks):
-            if t in CONJ_SPLIT_WORDS and 0 < i < len(toks) - 1:
-                cut = i
-                break
-
-        if cut is None:
-            out.append(" ".join(toks).strip())
-        else:
-            left = " ".join(toks[:cut]).strip()
-            right = " ".join(toks[cut+1:]).strip()
-            if left:
-                out.append(left)
-            if right:
-                out.append(right)
-
-    return out
-
-def detect_aspect_simple(tokens):
-    """
-    Seed-only detection:
-    - pakai _expand_for_seed supaya token bigram/underscore tetap kehitung
-    - scoring murni hit seed.json
-    """
-    _, _, _, _, SEED_DICT, _ = load_resources()
-
-    # expand underscore -> parts + token
-    expanded = _expand_for_seed(tokens)  # hasilnya sudah di-root_id
-    score = {a: 0 for a in ASPEK}
-
-    for a in ASPEK:
-        seed_roots = {_root_id(w) for w in SEED_DICT[a]}
-        score[a] = len(seed_roots & expanded)
-
-    best_a = max(score, key=score.get)
-    best_score = score[best_a]
-
-    if best_score == 0:
-        return None, score, 0
-    return best_a, score, best_score
-
-def segment_text_merge_by_aspect(text: str, use_lexicon=False):
-    """
-    FINAL (sesuai logika kamu):
-    - Split ringan per kalimat (.,!,?) lalu split konjungsi kontras (tapi/namun/...)
-    - Cari anchor aspek dari seeds.json (termasuk multiword seed pakai underscore)
-    - Segmentasi hanya saat aspek anchor berubah (A -> B)
-    - Gap words di antara anchor otomatis nempel ke segmen sebelumnya (tidak jadi segmen sendiri)
-    """
-    _, _, bigram, _, SEED_DICT, _ = load_resources()
-
-    # --- build seed phrase index (1-3 gram) ---
-    seed_phr = {a: {1: set(), 2: set(), 3: set()} for a in ASPEK}
-    for a in ASPEK:
-        for w in SEED_DICT[a]:
-            parts = [p for p in str(w).split("_") if p]
-            roots = tuple(_root_id(p) for p in parts)
-            L = len(roots)
-            if 1 <= L <= 3:
-                seed_phr[a][L].add(roots)
-
-    def _match_seed(roots, i):
-        # cek 3-gram lalu 2-gram lalu 1-gram (prioritas phrase lebih panjang)
-        for L in (3, 2, 1):
-            if i + L <= len(roots):
-                tup = tuple(roots[i:i+L])
-                for a in ASPEK:
-                    if tup in seed_phr[a][L]:
-                        return a, L
-        return None, 0
-
-    def _trim_edges(tokens):
-        # buang konjungsi/junk di ujung segmen
-        while tokens and _root_id(tokens[0]) in CONJ_TRIM:
-            tokens = tokens[1:]
-        while tokens and _root_id(tokens[-1]) in CONJ_TRIM:
-            tokens = tokens[:-1]
-        return tokens
-
-    # ---------- split kalimat: hanya . ! ? ----------
-    sents = split_into_sentences(text)
-    clauses = []
-    for s in sents:
-        toks = _simple_clean(s).split()
-        if use_lexicon:
-            toks = normalize_tokens_with_lexicon(toks)
-
-        if not toks:
-            continue
-
-        # split sekali berdasarkan konjungsi kontras (tapi/namun/...)
-        cut = None
-        for i, t in enumerate(toks):
-            if t in CONJ_BOUNDARY and 0 < i < len(toks) - 1:
-                cut = i
-                break
-
-        if cut is None:
-            clauses.append(" ".join(toks))
-        else:
-            left = " ".join(toks[:cut]).strip()
-            right = " ".join(toks[cut+1:]).strip()
-            if left:
-                clauses.append(left)
-            if right:
-                clauses.append(right)
-
-    if not clauses:
-        return []
-
-    segs = []
-    last_aspect = None
-
-    for cl in clauses:
-        toks_plain = _simple_clean(cl).split()
-        if use_lexicon:
-            toks_plain = normalize_tokens_with_lexicon(toks_plain)
-
-        toks_plain = _trim_edges(toks_plain)
-        if not toks_plain:
-            continue
-
-        roots = [_root_id(t) for t in toks_plain]
-
-        # --- cari anchors (pos, aspek) berdasarkan seed phrase ---
-        anchors = []
-        i = 0
-        while i < len(roots):
-            a, L = _match_seed(roots, i)
-            if a is not None:
-                anchors.append((i, a))
-                i += L
-            else:
+                attached.append(curr)
                 i += 1
 
-        # compress anchor berurutan aspek sama
-        comp = []
-        for pos, a in anchors:
-            if not comp or comp[-1][1] != a:
-                comp.append((pos, a))
+    return attached
 
-        # === kalau tidak ada anchor: nempel ke aspek sebelumnya (jangan bikin segmen baru yg random) ===
-        if not comp:
-            if segs and last_aspect is not None:
-                segs[-1]["seg_text"] += " " + " ".join(toks_plain)
-                segs[-1]["tokens"].extend(tokenize_from_val(" ".join(toks_plain), bigram=bigram))
-            else:
-                lda_tokens = tokenize_from_val(" ".join(toks_plain), bigram=bigram)
-                if use_lexicon:
-                    lda_tokens = normalize_tokens_with_lexicon(lda_tokens)
-                segs.append({
-                    "seg_text": " ".join(toks_plain),
-                    "tokens": lda_tokens,
-                    "anchor_aspect": None,
-                    "seed_hits": {a: 0 for a in ASPEK}
-                })
-            continue
-
-        # === bentuk segmen sebagai span anchor->anchor berikutnya (prefix ikut segmen pertama) ===
-        for idx, (pos, asp) in enumerate(comp):
-            start = 0 if idx == 0 else pos
-            end = comp[idx + 1][0] if idx + 1 < len(comp) else len(toks_plain)
-            seg_tokens = toks_plain[start:end]
-            seg_tokens = _trim_edges(seg_tokens)
-            if not seg_tokens:
-                continue
-
-            seg_text = " ".join(seg_tokens).strip()
-
-            lda_tokens = tokenize_from_val(seg_text, bigram=bigram)
-            if use_lexicon:
-                lda_tokens = normalize_tokens_with_lexicon(lda_tokens)
-
-            item = {
-                "seg_text": seg_text,
-                "tokens": lda_tokens,
-                "anchor_aspect": asp,
-                "seed_hits": {a: 0 for a in ASPEK}
-            }
-
-            # merge kalau aspek sama
-            if segs and segs[-1]["anchor_aspect"] == asp:
-                segs[-1]["seg_text"] += " " + item["seg_text"]
-                segs[-1]["tokens"].extend(item["tokens"])
-            else:
-                segs.append(item)
-
-            last_aspect = asp
-
-    return segs
 
 def test_segmented_text(
     text,
@@ -942,35 +455,22 @@ def test_segmented_text(
     seed_bonus=0.03,
     dampen_price_if_no_seed=True,
     price_delta=0.7,
-    prefer_seed_for_top1=True,
-    use_lexicon=False,
+    prefer_seed_for_top1=True
 ):
     _, _, bigram, _, _, _ = load_resources()
 
-    # 1) segmentasi seed-switch (yang kamu mau)
-    seg_infos = segment_text_merge_by_aspect(text, use_lexicon=use_lexicon)
+    seg_infos = segment_text_for_aspect(text)
 
-    if not seg_infos:
-        seg_infos = [{
-            "seg_text": text,
-            "anchor_aspect": None,
-            "tokens": tokenize_from_val(text, bigram=bigram),
-            "seed_hits": {a: 0 for a in ASPEK}
-        }]
-
-    results = []
-    for i, info in enumerate(seg_infos, start=1):
-        seg = info.get("seg_text", "").strip()
+    labeled = []
+    for info in seg_infos:
+        seg_display = info["seg_text"]
+        seg_model = info.get("seg_text_model", seg_display)
         anchor = info.get("anchor_aspect", None)
+        
+        toks = tokenize_from_val(seg_model, bigram=bigram)
 
-        toks = info.get("tokens")
-        if not toks:
-            toks = tokenize_from_val(seg, bigram=bigram)
-            if use_lexicon:
-                toks = normalize_tokens_with_lexicon(toks)
 
-        # 2) aspek prediksi LDA (buat fallback kalau anchor None)
-        p_raw, hits_lda, p_boost, aspect_pred, _ = predict_aspect_boosted(
+        p_raw, hits, p_boost, aspect_pred, aspect_top1_plain = predict_aspect_boosted(
             toks,
             lambda_boost=lambda_boost,
             gamma=gamma,
@@ -980,23 +480,121 @@ def test_segmented_text(
             prefer_seed_for_top1=prefer_seed_for_top1
         )
 
-        # seed_hits: tetap ambil dari segmenter (bukan dari LDA)
-        seed_hits = info.get("seed_hits", hits_lda)
-
         aspect_final = anchor if anchor is not None else aspect_pred
-        prob_final = p_boost.get(aspect_final, 0.0)
+        prob_final   = p_boost[aspect_final]
 
-        results.append({
-            "seg_index": i,
-            "seg_text": seg,
+        labeled.append({
+            "seg_text": seg_display,  
+            "anchor_aspect": anchor,
+            "tokens": toks,
             "p_boost": p_boost,
-            "seed_hits": seed_hits,
+            "seed_hits": hits,
             "aspect_final": aspect_final,
             "aspect_prob_final": prob_final,
         })
 
-    return results
+    # gabung segmen sangat pendek
+    merged_short = []
+    for item in labeled:
+        tok_len = len(item["tokens"])
+        if not merged_short:
+            merged_short.append(item)
+            continue
 
+        no_anchor = item.get("anchor_aspect") is None
+        total_seed_hits = sum(item["seed_hits"].values())
+
+        short_anchorless = (tok_len <= 4 and no_anchor and total_seed_hits == 0)
+        very_short_any  = (tok_len <= 2)
+
+        if short_anchorless or very_short_any:
+            prev = merged_short[-1]
+            combined_text = prev["seg_text"].rstrip(" ,") + " " + item["seg_text"].lstrip(" ,")
+            combined_tokens = tokenize_from_val(combined_text, bigram=bigram)
+
+            p_raw2, hits2, p_boost2, aspect2, aspect_top1_plain2 = predict_aspect_boosted(
+                combined_tokens,
+                lambda_boost=lambda_boost,
+                gamma=gamma,
+                seed_bonus=seed_bonus,
+                dampen_price_if_no_seed=dampen_price_if_no_seed,
+                price_delta=price_delta,
+                prefer_seed_for_top1=prefer_seed_for_top1
+            )
+
+            anchor_combined = prev.get("anchor_aspect", None)
+            aspect_final2   = anchor_combined if anchor_combined is not None else aspect2
+
+            merged_short[-1] = {
+                "seg_text": combined_text,
+                "anchor_aspect": anchor_combined,
+                "tokens": combined_tokens,
+                "p_boost": p_boost2,
+                "seed_hits": hits2,
+                "aspect_final": aspect_final2,
+                "aspect_prob_final": p_boost2[aspect_final2],
+            }
+        else:
+            merged_short.append(item)
+
+    # gabung segmen ber-aspek sama
+    merged = []
+    for item in merged_short:
+        if not merged:
+            merged.append(item)
+            continue
+
+        prev = merged[-1]
+        same_aspect = (item["aspect_final"] == prev["aspect_final"])
+
+        anchor_prev = prev.get("anchor_aspect", None)
+        anchor_curr = item.get("anchor_aspect", None)
+        anchor_conflict = (
+            anchor_prev is not None and
+            anchor_curr is not None and
+            anchor_prev != anchor_curr
+        )
+
+        if same_aspect and not anchor_conflict:
+            combined_text = prev["seg_text"].rstrip(" ,") + " " + item["seg_text"].lstrip(" ,")
+            combined_tokens = tokenize_from_val(combined_text, bigram=bigram)
+
+            p_raw2, hits2, p_boost2, aspect2, aspect_top1_plain2 = predict_aspect_boosted(
+                combined_tokens,
+                lambda_boost=lambda_boost,
+                gamma=gamma,
+                seed_bonus=seed_bonus,
+                dampen_price_if_no_seed=dampen_price_if_no_seed,
+                price_delta=price_delta,
+                prefer_seed_for_top1=prefer_seed_for_top1
+            )
+
+            anchor_combined = anchor_prev if anchor_prev is not None else anchor_curr
+            aspect_final2 = anchor_combined if anchor_combined is not None else aspect2
+
+            merged[-1] = {
+                "seg_text": combined_text,
+                "anchor_aspect": anchor_combined,
+                "tokens": combined_tokens,
+                "p_boost": p_boost2,
+                "seed_hits": hits2,
+                "aspect_final": aspect_final2,
+                "aspect_prob_final": p_boost2[aspect_final2],
+            }
+        else:
+            merged.append(item)
+
+    results = []
+    for i, r in enumerate(merged, start=1):
+        results.append({
+            "seg_index": i,
+            "seg_text": r["seg_text"],
+            "p_boost": r["p_boost"],
+            "seed_hits": r["seed_hits"],
+            "aspect_final": r["aspect_final"],
+            "aspect_prob_final": r["aspect_prob_final"],
+        })
+    return results
 
 # =====================================================
 # HELPER: PROSES DATASET MENJADI SEGMENT-LEVEL
@@ -1010,22 +608,20 @@ def run_absa_on_dataframe(df_raw, _sent_models):
     for idx, row in df_raw.iterrows():
         text = str(row["text-content"])
 
-        # Untuk dataset → gunakan use_lexicon=False (konsisten dengan korpus LDA)
-        segments = test_segmented_text(text, use_lexicon=True)
+        segments = test_segmented_text(text)
 
         for seg in segments:
             aspek = seg["aspect_final"]
-            seg_text = seg["seg_text"]
-
-            # Dataset: preprocessing sentimen juga tetap "ringan" (tanpa lexicon)
-            sent_label, _ = predict_sentiment_for_segment(
-                seg_text, aspek, _sent_models, use_lexicon=False
-            )
-
+        
+            seg_text_display = seg["seg_text"]  # DISPLAY
+            seg_text_model = seg.get("seg_text_model", seg_text_display)  # MODEL
+        
+            sent_label, _ = predict_sentiment_for_segment(seg_text_model, aspek, _sent_models)
+        
             data_rows.append({
                 "original_index": idx,
                 "Segmen": seg["seg_index"],
-                "Teks Segmen": seg_text,
+                "Teks Segmen": seg_text_display,   # <--- ini aman sekarang
                 "Aspek": aspek,
                 "Sentimen": sent_label,
                 "SkinType": row.get("profile-description", None),
@@ -1033,12 +629,14 @@ def run_absa_on_dataframe(df_raw, _sent_models):
                 "username": row.get("profile-username", None),
             })
 
+
     return pd.DataFrame(data_rows)
 
 
 # =====================================================
 # STREAMLIT UI
 # =====================================================
+# ===== CUSTOM CSS FOR DASHBOARD CARDS =====
 st.markdown("""
 <style>
 .metric-card {
@@ -1063,8 +661,9 @@ st.markdown("""
 
 
 def main():
+    
 
-    # ========================== SIDEBAR ==========================
+    # ========================== SIDEBAR PREMIUM ==========================
     with st.sidebar:
 
         ICON_DASHBOARD_MENU = "https://img.icons8.com/?size=100&id=94097&format=png&color=#A3A3A3"
@@ -1085,17 +684,22 @@ def main():
             index=0
         )
 
+
     # ==================== LOAD RESOURCES (MODEL) ========================
+    # --- Flash message LDA ---
+    # --- Load LDA ---
     try:
         dictionary, lda, bigram, topic2aspect, SEED_DICT, SEED_ROOTS = load_resources()
     except Exception as e:
         st.error(f"Gagal memuat model LDA: {e}")
         st.stop()
 
+    # --- Load logrec ---
     sent_models = load_sentiment_models()
     if not sent_models:
-        st.error("Model sentimen Logistic Regression tidak ditemukan. Periksa folder MODEL.")
+        st.error("Model sentimen logrec tidak ditemukan.")
         st.stop()
+
 
     # =====================================================================
     #                           ULASAN TUNGGAL
@@ -1110,37 +714,32 @@ def main():
             placeholder="Masukkan ulasan..."
         )
 
-        if st.button("🚀 Deteksi Aspek + Sentimen"):
+        if st.button(" Deteksi Aspek dan Sentimen"):
             if not text.strip():
                 st.warning("Teks kosong.")
                 st.stop()
 
-            # Tampilkan versi preproses (slang + kata dasar) sekadar info ke user
-            pre_single = preprocess_for_sentiment(text, use_lexicon=True)
-            st.markdown("**Teks setelah preprocessing (slang → baku + kata dasar):**")
-            st.code(pre_single, language="text")
-
-            # Segmentasi + LDA pakai lexicon
-            results = test_segmented_text(text, use_lexicon=True)
+            results = test_segmented_text(text)
 
             rows = []
             for r in results:
                 aspek = r["aspect_final"]
-                seg_text = r["seg_text"]
-
-                # Sentimen pun pakai preproses yang sama (lexicon=True)
-                sent_label, _ = predict_sentiment_for_segment(
-                    seg_text, aspek, sent_models, use_lexicon=True
-                )
-
+            
+                seg_text_display = join_clitics_id(r["seg_text"])  # DISPLAY rapi
+                seg_text_model = r.get("seg_text_model", seg_text_display)
+            
+                sent_label, _ = predict_sentiment_for_segment(seg_text_model, aspek, sent_models)
+            
                 rows.append({
                     "Segmen": r["seg_index"],
-                    "Teks Segmen": seg_text,
+                    "Teks Segmen": seg_text_display,
                     "Aspek": aspek,
                     "Sentimen": sent_label,
                 })
 
+            
             st.dataframe(pd.DataFrame(rows), use_container_width=True)
+
 
     # =====================================================================
     #                        DASHBOARD DATASET
@@ -1154,6 +753,7 @@ def main():
         )
 
         if uploaded is not None:
+            # Load data
             if uploaded.name.endswith(".csv"):
                 df_raw = pd.read_csv(uploaded)
             else:
@@ -1161,10 +761,19 @@ def main():
 
             st.success(f"File berhasil dimuat: {df_raw.shape[0]} baris")
 
+            # Proses ABSA
             with st.spinner("Memproses ABSA seluruh dataset..."):
                 df_seg = run_absa_on_dataframe(df_raw, sent_models)
 
+            df_seg["Teks Segmen Display"] = (
+                df_seg["Teks Segmen"]
+                .astype(str)
+                .apply(join_clitics_id)
+            )
+
+
             # ===================== DASHBOARD SUMMARY CARDS =====================
+            # ---------- Insight: Ringkasan Cepat Dataset ----------
             st.markdown("### Quick Dataset Overview")
 
             c1, c2, c3, c4 = st.columns(4)
@@ -1172,6 +781,7 @@ def main():
             total_ulasan = df_raw.shape[0]
             total_segmen = df_seg.shape[0]
 
+            # Hitung sentimen keseluruhan
             sentiment_counts = df_seg["Sentimen"].value_counts()
 
             pos_count = sentiment_counts.get("Positive", 0)
@@ -1180,6 +790,7 @@ def main():
             pos_percent = (pos_count / total_segmen) * 100 if total_segmen > 0 else 0
             neg_percent = (neg_count / total_segmen) * 100 if total_segmen > 0 else 0
 
+            # Kotak 1
             with c1:
                 st.markdown(f"""
                 <div style="padding:20px; background:#00c0ef; border-radius:12px; text-align:center;">
@@ -1188,6 +799,7 @@ def main():
                 </div>
                 """, unsafe_allow_html=True)
 
+            # Kotak 2
             with c2:
                 st.markdown(f"""
                 <div style="padding:20px; background:#f39c12; border-radius:12px; text-align:center;">
@@ -1196,6 +808,7 @@ def main():
                 </div>
                 """, unsafe_allow_html=True)
 
+            # Kotak 3 — Sentimen Positif
             with c3:
                 st.markdown(f"""
                 <div style="padding:20px; background:#00a65a; border-radius:12px; text-align:center;">
@@ -1204,6 +817,7 @@ def main():
                 </div>
                 """, unsafe_allow_html=True)
 
+            # Kotak 4 — Sentimen Negatif
             with c4:
                 st.markdown(f"""
                 <div style="padding:20px; background:#dd4b39; border-radius:12px; text-align:center;">
@@ -1212,29 +826,37 @@ def main():
                 </div>
                 """, unsafe_allow_html=True)
 
+
+
             # Tambah kolom SkinTypeMain
             df_seg["SkinTypeMain"] = df_seg["SkinType"].astype(str).apply(lambda x: x.split(",")[0].strip())
 
             # ====================== KPI CARDS ======================
             st.markdown("### Key Metrics")
 
+            # Hitung jumlah sentimen
             sent_counts = df_seg["Sentimen"].value_counts()
             pos_count = sent_counts.get("Positive", 0)
             neg_count = sent_counts.get("Negative", 0)
+
+            # Hitung total aspek unik yang muncul di hasil segmentasi
             total_aspek = df_seg["Aspek"].nunique()
 
             c1, c2, c3 = st.columns(3)
 
+            # Jumlah Ulasan Positif
             c1.metric(
                 label="Jumlah Ulasan Positif",
                 value=pos_count
             )
 
+            # Jumlah Ulasan Negatif
             c2.metric(
                 label="Jumlah Ulasan Negatif",
                 value=neg_count
             )
 
+            # Total Aspek
             c3.metric(
                 label="Total Aspek",
                 value=total_aspek
@@ -1244,6 +866,7 @@ def main():
 
             df_filtered = df_seg[df_seg["Sentimen"].isin(["Positive", "Negative"])]
 
+            # --- Data Sentimen per Aspek ---
             dist_aspek = (
                 df_filtered.groupby(["Aspek", "Sentimen"])
                 .size()
@@ -1254,12 +877,14 @@ def main():
             
             st.markdown("###### Distribusi Sentimen per Aspek")
 
+            # --- Donut Chart ---
+
             color_map_aspek = {
-                "Aroma":   ["#2ecc71", "#1c973b"],
-                "Kemasan": ["#61bdfb", "#1672c8"],
-                "Harga":   ["#c390d8", "#b73ce7"],
-                "Tekstur": ["#ff983d", "#f27333"],
-                "Efek":    ["#fd79a8", "#dd339c"],
+                "Aroma": ["#2ecc71", "#1c973b"],       
+                "Kemasan": ["#61bdfb", "#1672c8"],     
+                "Harga": ["#c390d8", "#b73ce7"],       
+                "Tekstur": ["#ff983d", "#f27333"],     
+                "Efek": ["#fd79a8", "#dd339c"],        
             }
 
             cols = st.columns(5)
@@ -1289,6 +914,9 @@ def main():
 
                 cols[i].plotly_chart(fig_donut, use_container_width=True)
 
+
+
+            # --- Bar Chart ---
             fig_bar = px.bar(
                 dist_aspek,
                 x="Aspek",
@@ -1297,8 +925,8 @@ def main():
                 barmode="group",
                 text="count",
                 color_discrete_map={
-                    "Positive": "#2ecc71",
-                    "Negative": "#e74c3c"
+                    "Positif": "#2ecc71",
+                    "Negatif": "#e74c3c"
                 }
             )
             fig_bar.update_layout(
@@ -1306,6 +934,7 @@ def main():
             )
 
             st.plotly_chart(fig_bar, use_container_width=True)
+
 
             # ====================== INSIGHT 2 ======================
 
@@ -1338,6 +967,7 @@ def main():
 
             st.plotly_chart(fig2, use_container_width=True)
 
+
             # ====================== INSIGHT 3 ======================
 
             dist_age_simple = (
@@ -1357,6 +987,7 @@ def main():
                     "Positive": "#ff9860",
                     "Negative": "#f96c15"
                 }
+                
             )
 
             fig3.update_layout(
@@ -1392,25 +1023,31 @@ def main():
             )
             st.plotly_chart(fig4, use_container_width=True)
 
+
             # ====================== INSIGHT 5 ======================
             st.markdown("##### WordCloud Sentimen Positif & Negatif")
 
+            # Filter data
             df_seg["Sentimen"] = (
                 df_seg["Sentimen"]
-                .astype(str)
                 .str.strip()
                 .str.lower()
                 .str.capitalize()
             )
 
+            # Ambil teks
             positif_text = " ".join(df_seg[df_seg["Sentimen"] == "Positive"]["Teks Segmen"])
             negatif_text = " ".join(df_seg[df_seg["Sentimen"] == "Negative"]["Teks Segmen"])
 
+            # Warna berbeda per wordcloud
             color_pos = "Greens"
             color_neg = "Reds"
 
             col1, col2 = st.columns(2)
 
+            # ==================
+            # Wordcloud Positif
+            # ==================
             with col1:
                 st.markdown("### WordCloud Positif")
 
@@ -1427,6 +1064,9 @@ def main():
                 ax.axis("off")
                 st.pyplot(fig)
 
+            # ==================
+            # Wordcloud Negatif
+            # ==================
             with col2:
                 st.markdown("### WordCloud Negatif")
 
@@ -1443,17 +1083,23 @@ def main():
                 ax2.axis("off")
                 st.pyplot(fig2)
 
+
             # ====================== INSIGHT 6 ======================
             st.markdown("###  Dataframe Segmen (Aspek + Sentimen)")
 
-            cols_show = ["original_index", "Segmen", "Teks Segmen", "Aspek", "Sentimen"]
+            cols_show = ["original_index", "Segmen", "Teks Segmen Display", "Aspek", "Sentimen"]
             st.dataframe(df_seg[cols_show], use_container_width=True)
 
+
+    
+    
+    
+    
     st.markdown("""
     <hr style="margin-top:40px;">
 
     <div style="text-align:center; font-size:13px; color:gray; padding:10px;">
-        © 2025 Danskuy — Female Daily Review Analysis Dashboard  
+        © 2025 Rifqi — Female Daily Review Analysis Dashboard  
     </div>
     """, unsafe_allow_html=True)
 

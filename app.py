@@ -462,36 +462,35 @@ def detect_aspect_simple(tokens, SEED_ROOTS):
 
 def segment_text_merge_by_aspect(text: str, bigram, SEED_ROOTS, use_lexicon=False):
     """
-    SEGMENTASI LEBIH LOGIS:
-    1) split kasar (tanda baca + konjungsi, termasuk trs/terus)
-    2) dalam tiap chunk, scan token:
-       - kalau ketemu aspek baru (BASE_ROOT / SEED) yg berbeda dari aspek sekarang -> CUT
-    3) merge jika aspek sama
+    SEGMENTASI STABIL (ANTI NGACAK):
+    - Split kasar by punctuation + conjunction
+    - Dalam 1 chunk, cari titik switch hanya jika:
+        1) Ada BASE_ROOT eksplisit (harganya/teksturnya/aromanya/kemasannya/efeknya)
+        2) ATAU seed aspect baru kuat: minimal 2 seed hits dalam window kecil
+    - Segmen tidak boleh terlalu pendek (min_words)
     """
 
     chunks = split_by_punct_and_conj(text)
     if not chunks:
         return []
 
-    def detect_aspect_token(tok):
-        """
-        Deteksi aspek dari token tunggal:
-        - BASE_ROOT (kemas, aroma, tekstur, harga, efek) substring kuat
-        - SEED_ROOTS (seeds.json)
-        """
-        r = _root_id(tok)
+    # parameter stabilisasi
+    WINDOW = 6            # window token untuk cek seed hits
+    SEED_MIN_HITS = 2     # minimal 2 seed hits agar boleh switch
+    MIN_WORDS = 4         # minimal panjang segmen agar boleh dipotong
 
-        # 1) BASE_ROOT (strong explicit)
+    def aspect_from_base_root(tok):
+        r = _root_id(tok)
         for a in ASPEK:
             if BASE_ROOT[a] in r:
                 return a
-
-        # 2) seed roots
-        for a in ASPEK:
-            if r in SEED_ROOTS[a]:
-                return a
-
         return None
+
+    def seed_hits_in_window(tokens_window):
+        roots = {_root_id(t) for t in tokens_window}
+        score = {a: len(SEED_ROOTS[a] & roots) for a in ASPEK}
+        best_a = max(score, key=score.get)
+        return best_a, score[best_a], score
 
     segs = []
     last_aspect = None
@@ -504,24 +503,38 @@ def segment_text_merge_by_aspect(text: str, bigram, SEED_ROOTS, use_lexicon=Fals
         if not toks_plain:
             continue
 
-        # ===== scan token untuk cut =====
-        start = 0
+        # tentukan aspek awal segmen
         current_aspect = None
+        start = 0
 
-        for i, tok in enumerate(toks_plain):
-            a_tok = detect_aspect_token(tok)
+        # cari aspek awal dari base_root dulu
+        for t in toks_plain:
+            a0 = aspect_from_base_root(t)
+            if a0 is not None:
+                current_aspect = a0
+                break
 
-            # set aspek pertama jika belum ada
-            if current_aspect is None and a_tok is not None:
-                current_aspect = a_tok
-                last_aspect = current_aspect
+        # kalau belum ketemu base root -> coba seed kuat dari awal chunk
+        if current_aspect is None:
+            best_a, best_hits, _ = seed_hits_in_window(toks_plain[:WINDOW])
+            if best_hits >= SEED_MIN_HITS:
+                current_aspect = best_a
+            else:
+                current_aspect = last_aspect
 
-            # jika ketemu aspek baru yang beda -> CUT
-            if a_tok is not None and current_aspect is not None and a_tok != current_aspect:
+        # scan untuk kemungkinan switch
+        i = 0
+        while i < len(toks_plain):
+            tok = toks_plain[i]
+
+            # (1) cek base_root eksplisit (paling kuat)
+            a_base = aspect_from_base_root(tok)
+
+            if a_base is not None and current_aspect is not None and a_base != current_aspect:
+                # potong hanya kalau segmen kiri sudah cukup panjang
                 left_tokens = toks_plain[start:i]
-                left_text = " ".join(left_tokens).strip()
-
-                if left_text:
+                if len(left_tokens) >= MIN_WORDS:
+                    left_text = " ".join(left_tokens).strip()
                     toks_lda = tokenize_from_val(left_text, bigram=bigram)
                     if use_lexicon:
                         toks_lda = normalize_tokens_with_lexicon(toks_lda)
@@ -533,23 +546,45 @@ def segment_text_merge_by_aspect(text: str, bigram, SEED_ROOTS, use_lexicon=Fals
                         "seed_hits": {a: 0 for a in ASPEK}
                     })
 
-                # update pointer
-                start = i
-                current_aspect = a_tok
-                last_aspect = current_aspect
+                    start = i
+                    current_aspect = a_base
+                    last_aspect = current_aspect
+                # jika segmen kiri masih pendek -> jangan potong
+                i += 1
+                continue
+
+            # (2) cek seed kuat di window (anti false switch)
+            win = toks_plain[i:i+WINDOW]
+            best_a, best_hits, _ = seed_hits_in_window(win)
+
+            if (best_a is not None and current_aspect is not None and best_a != current_aspect and best_hits >= SEED_MIN_HITS):
+                left_tokens = toks_plain[start:i]
+                if len(left_tokens) >= MIN_WORDS:
+                    left_text = " ".join(left_tokens).strip()
+                    toks_lda = tokenize_from_val(left_text, bigram=bigram)
+                    if use_lexicon:
+                        toks_lda = normalize_tokens_with_lexicon(toks_lda)
+
+                    segs.append({
+                        "seg_text": left_text,
+                        "tokens": toks_lda,
+                        "anchor_aspect": current_aspect,
+                        "seed_hits": {a: 0 for a in ASPEK}
+                    })
+
+                    start = i
+                    current_aspect = best_a
+                    last_aspect = current_aspect
+
+            i += 1
 
         # segmen terakhir
         last_tokens = toks_plain[start:]
-        last_text = " ".join(last_tokens).strip()
-
-        if last_text:
+        if last_tokens:
+            last_text = " ".join(last_tokens).strip()
             toks_lda = tokenize_from_val(last_text, bigram=bigram)
             if use_lexicon:
                 toks_lda = normalize_tokens_with_lexicon(toks_lda)
-
-            # kalau masih tidak punya aspek, wariskan
-            if current_aspect is None:
-                current_aspect = last_aspect
 
             segs.append({
                 "seg_text": last_text,
@@ -558,7 +593,7 @@ def segment_text_merge_by_aspect(text: str, bigram, SEED_ROOTS, use_lexicon=Fals
                 "seed_hits": {a: 0 for a in ASPEK}
             })
 
-    # ===== merge jika aspek sama =====
+    # merge aspek sama supaya tidak pecah kecil
     merged = []
     for item in segs:
         if not merged:

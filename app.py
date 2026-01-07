@@ -284,37 +284,47 @@ def segment_text_for_aspect(text: str):
     sentences = split_into_sentences(text)
     segments = []
 
-    # --- 1) Segmentasi awal per kalimat + anchor BASE_ROOT + 'cocok' ---
+    # --- 1) Segmentasi awal per kalimat + anchor BASE_ROOT + SEED ---
     for sent in sentences:
         cleaned = _simple_clean(sent)
         cleaned = split_clitics_id(cleaned)
         tokens = cleaned.split()
 
-
-
         if not tokens:
             continue
 
         anchor_list = []
+
+        # ✅ LOOP HARUS DI DALAM BLOK INI
         for idx, tok in enumerate(tokens):
             root = _root_id(_simple_clean(tok))
 
-            anchored = False
+            found = None
+
+            # 1) PRIORITAS BASE_ROOT
             for aspek in ASPEK:
                 base = BASE_ROOT[aspek]
                 if base in root:
-                    start_pos = idx
-                    if idx > 0:
-                        prev_root = _root_id(_simple_clean(tokens[idx - 1]))
-                        if prev_root == "segi":
-                            start_pos = idx - 1
-                    anchor_list.append((start_pos, aspek))
-                    anchored = True
+                    found = aspek
                     break
 
+            # 2) kalau tidak ada BASE_ROOT, baru cek seed.json
+            if found is None:
+                found = detect_aspect_from_token(tok)
 
+            # kalau ketemu aspek → simpan posisi
+            if found is not None:
+                start_pos = idx
 
+                # kasus: "dari segi kemasan ..."
+                if idx > 0:
+                    prev_root = _root_id(_simple_clean(tokens[idx - 1]))
+                    if prev_root == "segi":
+                        start_pos = idx - 1
 
+                anchor_list.append((start_pos, found))
+
+        # ✅ kalau tidak ada anchor sama sekali
         if not anchor_list:
             seg_text = sent.strip()
             segments.append({
@@ -322,9 +332,9 @@ def segment_text_for_aspect(text: str):
                 "seg_text_model": normalize_text(seg_text),
                 "anchor_aspect": None
             })
-
             continue
 
+        # compress anchor berurutan aspek sama
         compressed = []
         for pos, asp in sorted(anchor_list, key=lambda x: x[0]):
             if not compressed or compressed[-1][1] != asp:
@@ -332,6 +342,8 @@ def segment_text_for_aspect(text: str):
 
         prev_end = 0
         for i, (pos, asp) in enumerate(compressed):
+
+            # segmen sebelum anchor → None
             if prev_end < pos:
                 seg_tokens = tokens[prev_end:pos]
                 seg_text = " ".join(seg_tokens).strip(" ,")
@@ -342,25 +354,25 @@ def segment_text_for_aspect(text: str):
                         "anchor_aspect": None
                     })
 
-
+            # segmen anchor → asp
             end = compressed[i + 1][0] if i + 1 < len(compressed) else len(tokens)
             seg_tokens = tokens[pos:end]
             seg_text = " ".join(seg_tokens).strip(" ,")
+
             if seg_text:
                 segments.append({
-                "seg_text": seg_text,
-                "seg_text_model": normalize_text(seg_text),
-                "anchor_aspect": asp
-            })
-
+                    "seg_text": seg_text,
+                    "seg_text_model": normalize_text(seg_text),
+                    "anchor_aspect": asp
+                })
 
             prev_end = end
 
     # --- 2) Refinement ekor segmen milik aspek berikutnya ---
     refined = []
     BACK_WINDOW = 4
-
     i = 0
+
     while i < len(segments):
         curr = segments[i]
 
@@ -402,7 +414,7 @@ def segment_text_for_aspect(text: str):
         refined.append(curr)
         i += 1
 
-    # --- 3) Gabungkan segmen tanpa anchor ---
+    # --- 3) Gabungkan segmen tanpa anchor ke segmen anchor terdekat ---
     attached = []
     seen_anchor = False
 

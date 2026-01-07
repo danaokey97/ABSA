@@ -764,18 +764,22 @@ def test_segmented_text(
 # =====================================================
 # HELPER: PROSES DATASET MENJADI SEGMENT-LEVEL
 # =====================================================
-@st.cache_data
-def run_absa_on_dataframe(df_raw, _sent_models, dictionary, lda, bigram, topic2aspect, SEED_DICT, SEED_ROOTS):
+@st.cache_data(show_spinner=False)
+def run_absa_on_dataframe(df_raw):
     """
-    FIX: dataset pakai use_lexicon=False agar konsisten dengan training LDA (dictionary)
-    Sentimen dataset default use_lexicon=False (ubah jika training logreg pakai lexicon)
+    Cache hanya untuk DATAFRAME input.
+    Model tidak dikirim sebagai parameter karena tidak hashable.
     """
+
+    dictionary, lda, bigram, topic2aspect, SEED_DICT, SEED_ROOTS = load_resources()
+    sent_models = load_sentiment_models()
+
     data_rows = []
 
     for idx, row in df_raw.iterrows():
         text = str(row["text-content"])
 
-        # ✅ Dataset -> use_lexicon=False (LDA harus match dictionary)
+        # Dataset -> LDA konsisten = use_lexicon=False
         segments = test_segmented_text(
             text,
             dictionary=dictionary,
@@ -791,9 +795,9 @@ def run_absa_on_dataframe(df_raw, _sent_models, dictionary, lda, bigram, topic2a
             aspek = seg["aspect_final"]
             seg_text = seg["seg_text"]
 
-            # ✅ Dataset sentimen -> default False (ubah kalau training logreg pakai lexicon)
+            # Sentimen dataset default False (sesuaikan training jika perlu)
             sent_label, _ = predict_sentiment_for_segment(
-                seg_text, aspek, _sent_models, use_lexicon=False
+                seg_text, aspek, sent_models, use_lexicon=False
             )
 
             data_rows.append({
@@ -934,11 +938,7 @@ def main():
             st.success(f"File berhasil dimuat: {df_raw.shape[0]} baris")
 
             with st.spinner("Memproses ABSA seluruh dataset..."):
-                df_seg = run_absa_on_dataframe(
-                    df_raw,
-                    sent_models,
-                    dictionary, lda, bigram, topic2aspect, SEED_DICT, SEED_ROOTS
-                )
+                df_seg = run_absa_on_dataframe(df_raw)
 
             # ===================== DASHBOARD SUMMARY CARDS =====================
             st.markdown("### Quick Dataset Overview")

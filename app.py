@@ -786,13 +786,10 @@ def detect_aspect_simple(tokens):
 def segment_text_merge_by_aspect(text: str, use_lexicon=False):
     """
     PERBAIKAN:
-    1) split kasar (punct + konjungsi)
-    2) aspek eksplisit (BASE_ROOT) -> pasti switch
-    3) jika tidak eksplisit:
-       - jika seed kuat (>=MIN_STRONG) -> boleh jadi aspek
-       - jika seed lemah -> jangan tentukan dulu (None)
-    4) forward-fill & backward-fill untuk None berdasarkan segmen kuat terdekat
-    5) merge jika aspek sama
+    - explicit (BASE_ROOT) paling prioritas
+    - seed kuat (>=MIN_STRONG) boleh jadi aspek
+    - seed lemah -> None dulu, nanti diwariskan (forward/backward)
+    - aman walau detect_aspect_simple return 2 atau 3 nilai
     """
     _, _, bigram, _, _, _ = load_resources()
 
@@ -810,7 +807,6 @@ def segment_text_merge_by_aspect(text: str, use_lexicon=False):
                     return a
         return None
 
-    # ===== pass 1: buat list item dengan label awal (explicit > seed kuat > None) =====
     items = []
     for ch in chunks:
         toks_plain = _simple_clean(ch).split()
@@ -819,9 +815,17 @@ def segment_text_merge_by_aspect(text: str, use_lexicon=False):
 
         asp_explicit = explicit_aspect_from_tokens(toks_plain)
 
-        asp_seed, hits = detect_aspect_simple(toks_plain)
-        best_seed = hits.get(asp_seed, 0) if asp_seed else 0
+        # ---- robust call detect_aspect_simple ----
+        res = detect_aspect_simple(toks_plain)
+        if isinstance(res, tuple) and len(res) == 3:
+            asp_seed, hits, best_seed = res
+        elif isinstance(res, tuple) and len(res) == 2:
+            asp_seed, hits = res
+            best_seed = hits.get(asp_seed, 0) if asp_seed else 0
+        else:
+            asp_seed, hits, best_seed = None, {a: 0 for a in ASPEK}, 0
 
+        # label awal
         if asp_explicit is not None:
             asp = asp_explicit
             strong = True
@@ -842,10 +846,10 @@ def segment_text_merge_by_aspect(text: str, use_lexicon=False):
             "tokens": toks_lda,
             "anchor_aspect": asp,
             "seed_hits": hits,
-            "is_strong": strong
+            "is_strong": strong,
         })
 
-    # ===== pass 2: forward fill (wariskan dari aspek kuat sebelumnya) =====
+    # forward fill dari aspek kuat sebelumnya
     last_strong = None
     for it in items:
         if it["anchor_aspect"] is not None and it["is_strong"]:
@@ -853,7 +857,7 @@ def segment_text_merge_by_aspect(text: str, use_lexicon=False):
         elif it["anchor_aspect"] is None and last_strong is not None:
             it["anchor_aspect"] = last_strong
 
-    # ===== pass 3: backward fill (kalau awal None tapi setelahnya kuat) =====
+    # backward fill dari aspek kuat setelahnya (buat awal teks yang None)
     next_strong = None
     for i in range(len(items) - 1, -1, -1):
         it = items[i]
@@ -862,7 +866,7 @@ def segment_text_merge_by_aspect(text: str, use_lexicon=False):
         elif it["anchor_aspect"] is None and next_strong is not None:
             it["anchor_aspect"] = next_strong
 
-    # ===== pass 4: merge jika aspek sama =====
+    # merge kalau aspek sama
     segs = []
     for it in items:
         asp = it["anchor_aspect"]

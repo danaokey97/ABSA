@@ -788,10 +788,12 @@ def detect_aspect_simple(tokens):
 
 def segment_text_merge_by_aspect(text: str, use_lexicon=False):
     """
-    LOGIKA SESUAI MAUMU:
+    LOGIKA FINAL:
     1) split kasar (tanda baca + konjungsi)
-    2) tentukan aspek tiap potongan (seed)
-    3) gabung potongan berurutan jika aspek sama
+    2) kalau chunk mengandung kata aspek eksplisit (kemas/aroma/tekstur/harga/efek) -> pakai itu (switch boleh)
+    3) kalau tidak ada kata aspek eksplisit -> WARISKAN aspek sebelumnya (JANGAN switch pakai seed)
+    4) kalau awal teks dan tidak ada aspek eksplisit -> baru pakai seed
+    5) merge jika aspek sama
     """
     _, _, bigram, _, _, _ = load_resources()
 
@@ -799,30 +801,39 @@ def segment_text_merge_by_aspect(text: str, use_lexicon=False):
     if not chunks:
         return []
 
+    def explicit_aspect_from_tokens(tokens_plain):
+        # cek substring base_root (harganya -> harga, kemasannya -> kemas, dst)
+        for tok in tokens_plain:
+            r = _root_id(tok)
+            for a in ASPEK:
+                if BASE_ROOT[a] in r:
+                    return a
+        return None
+
     segs = []
-    prev_aspect = None
+    last_aspect = None
 
     for ch in chunks:
         toks_plain = _simple_clean(ch).split()
         if use_lexicon:
             toks_plain = normalize_tokens_with_lexicon(toks_plain)
 
-        asp, hits = detect_aspect_simple(toks_plain)
+        # hitung seed hits (buat info/debug, tapi tidak dipakai buat switch kalau bukan eksplisit)
+        asp_seed, hits = detect_aspect_simple(toks_plain)
 
-        roots = {_root_id(t) for t in toks_plain}
-        # anchor eksplisit (kemas/aroma/tekstur/harga/efek) ada?
-        has_explicit_anchor = any(BASE_ROOT[a] in r for r in roots for a in ASPEK)
-        best_score = hits.get(asp, 0) if asp is not None else 0
+        asp_explicit = explicit_aspect_from_tokens(toks_plain)
 
-        MIN_SEED_TO_SWITCH = 2  # <- ini kuncinya
-        if prev_aspect is not None and (not has_explicit_anchor) and best_score < MIN_SEED_TO_SWITCH:
-            asp = prev_aspect
+        if asp_explicit is not None:
+            asp = asp_explicit
+            last_aspect = asp_explicit
+        else:
+            # ✅ LANJUTAN KONTEN -> ikut aspek sebelumnya
+            if last_aspect is not None:
+                asp = last_aspect
+            else:
+                # awal teks tanpa kata aspek eksplisit -> pakai seed
+                asp = asp_seed
 
-        # kalau tidak terdeteksi aspek, wariskan dari sebelumnya (lanjutan konteks)
-        if asp is None and prev_aspect is not None:
-            asp = prev_aspect
-
-        # tokens untuk LDA boleh pakai bigram
         toks_lda = tokenize_from_val(ch, bigram=bigram)
         if use_lexicon:
             toks_lda = normalize_tokens_with_lexicon(toks_lda)
@@ -834,16 +845,15 @@ def segment_text_merge_by_aspect(text: str, use_lexicon=False):
             "seed_hits": hits
         }
 
-        # gabung jika aspek sama
+        # merge kalau aspek sama
         if segs and asp is not None and segs[-1]["anchor_aspect"] == asp:
             segs[-1]["seg_text"] += " " + item["seg_text"]
             segs[-1]["tokens"].extend(item["tokens"])
         else:
             segs.append(item)
 
-        prev_aspect = asp if asp is not None else prev_aspect
-
     return segs
+
 
 def test_segmented_text(
     text,

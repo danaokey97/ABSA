@@ -930,11 +930,9 @@ def test_segmented_text(
         ap = prev_item.get("anchor_aspect")
         ac = curr_item.get("anchor_aspect")
 
-        # kalau dua-duanya anchor ada dan beda -> jangan merge
         if ap is not None and ac is not None and ap != ac:
             return False
 
-        # kalau seed-dominant beda -> jangan merge
         dp = dominant_seed_aspect(prev_item.get("seed_hits"))
         dc = dominant_seed_aspect(curr_item.get("seed_hits"))
         if dp is not None and dc is not None and dp != dc:
@@ -942,7 +940,7 @@ def test_segmented_text(
 
         return True
 
-    # ✅ pakai segmenter yang benar
+    # ✅ pakai segmenter kamu (yang merge_by_aspect)
     seg_infos = segment_text_merge_by_aspect(text, use_lexicon=use_lexicon)
 
     if not seg_infos:
@@ -953,9 +951,6 @@ def test_segmented_text(
             "seed_hits": {a: 0 for a in ASPEK}
         }]
 
-    # =========================
-    # Label setiap segmen
-    # =========================
     labeled = []
     for info in seg_infos:
         seg = info.get("seg_text", "")
@@ -977,15 +972,16 @@ def test_segmented_text(
             prefer_seed_for_top1=prefer_seed_for_top1
         )
 
-        seed_hits = info.get("seed_hits", hits_lda)
+        # ✅ FIX UTAMA: seed_hits harus dari hasil LDA (hits_lda), bukan info lama
+        seed_hits = hits_lda
 
-        # ✅ seed_dom = aspek seed paling dominan
         seed_dom = dominant_seed_aspect(seed_hits)
-        
+
+        # ✅ LOGIKA FINAL: anchor tetap prioritas
         if anchor is not None:
             aspect_final = anchor
         else:
-            # ✅ kalau seed ada → paksa ikut seed (override ringan)
+            # ✅ override ringan kalau seed_dom cukup kuat
             if seed_dom is not None and p_boost.get(seed_dom, 0) >= 0.20:
                 aspect_final = seed_dom
             else:
@@ -1004,7 +1000,7 @@ def test_segmented_text(
         })
 
     # =========================
-    # Merge segmen sangat pendek (hanya kalau aman)
+    # Merge segmen sangat pendek (aman)
     # =========================
     merged_short = []
     for item in labeled:
@@ -1038,7 +1034,6 @@ def test_segmented_text(
                 prefer_seed_for_top1=prefer_seed_for_top1
             )
 
-            # anchor tidak boleh berubah sembarangan
             anchor_combined = prev.get("anchor_aspect", None)
             if anchor_combined is None:
                 anchor_combined = item.get("anchor_aspect", None)
@@ -1058,7 +1053,7 @@ def test_segmented_text(
             merged_short.append(item)
 
     # =========================
-    # Merge segmen ber-aspek sama (hanya kalau aman)
+    # Merge segmen dengan aspek sama (aman)
     # =========================
     merged = []
     for item in merged_short:
@@ -1110,7 +1105,7 @@ def test_segmented_text(
             merged.append(item)
 
     # =========================
-    # Output
+    # Output final
     # =========================
     results = []
     for i, r in enumerate(merged, start=1):

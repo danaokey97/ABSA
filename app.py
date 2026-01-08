@@ -913,7 +913,44 @@ def has_aspect_evidence(tokens_plain, SEED_ROOTS):
             return True
 
     return False
+def merge_very_short_segments_always(segs, use_lexicon=False, max_words=3):
+    """
+    Merge segmen super pendek (<= max_words) ke segmen sebelumnya,
+    WALAU ada seed (contoh: rasa, lengket), selama tidak ada kata aspek eksplisit
+    seperti harga/tekstur/aroma/kemasan/efek di segmen pendek itu.
+    """
+    if not segs or len(segs) < 2:
+        return segs
 
+    merged = [segs[0]]
+
+    for i in range(1, len(segs)):
+        curr = segs[i]
+        prev = merged[-1]
+
+        toks_plain = _simple_clean(curr["seg_text"]).split()
+        if use_lexicon:
+            toks_plain = normalize_tokens_with_lexicon(toks_plain)
+
+        # ✅ cek apakah segmen pendek punya kata aspek eksplisit
+        has_explicit = False
+        for tok in toks_plain:
+            r = _root_id(tok)
+            for a in ASPEK:
+                if BASE_ROOT[a] in r:
+                    has_explicit = True
+                    break
+            if has_explicit:
+                break
+
+        # ✅ kalau segmen sangat pendek dan tidak ada aspek eksplisit → merge
+        if len(toks_plain) <= max_words and not has_explicit:
+            prev["seg_text"] = prev["seg_text"].rstrip(" ,") + " " + curr["seg_text"].lstrip(" ,")
+            prev["tokens"].extend(curr["tokens"])
+        else:
+            merged.append(curr)
+
+    return merged
 
 def merge_short_tail_segments(segs, SEED_ROOTS, use_lexicon=False, max_words=2):
     """
@@ -1022,8 +1059,12 @@ def segment_text_merge_by_aspect(text: str, use_lexicon=False):
     # ✅ merge segmen super pendek (mis: "akan", "tetap") jika tidak punya seed/base_root
     _, _, _, _, _, SEED_ROOTS = load_resources()
     segs = merge_short_tail_segments(segs, SEED_ROOTS, use_lexicon=use_lexicon, max_words=3)
+    
+    # ✅ tambahan ini
+    segs = merge_very_short_segments_always(segs, use_lexicon=use_lexicon, max_words=3)
 
     return segs
+
 
 
 

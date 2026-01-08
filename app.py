@@ -995,13 +995,13 @@ def segment_text_merge_by_aspect(text: str, use_lexicon=False):
             last_aspect = asp
         else:
             if asp_explicit is not None:
-            asp = asp_explicit
-            last_aspect = asp_explicit
+                asp = asp_explicit
+                last_aspect = asp_explicit
             else:
                 if last_aspect is not None:
-                asp = last_aspect
+                    asp = last_aspect
                 else:
-                asp = asp_seed
+                    asp = asp_seed
 
         toks_lda = tokenize_from_val(ch, bigram=bigram)
         if use_lexicon:

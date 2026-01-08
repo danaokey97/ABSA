@@ -785,6 +785,23 @@ def detect_aspect_simple(tokens):
     if score[best_a] == 0:
         return None, score
     return best_a, score
+def detect_aspect_negation_pattern(tokens_plain):
+    """
+    Kalau ada pola: NEG_WORD + kata_seed_aspek
+    maka aspek = aspek seed tersebut.
+    Contoh: tidak mahal -> Harga
+    """
+    _, _, _, _, _, SEED_ROOTS = load_resources()
+
+    roots = [_root_id(t) for t in tokens_plain]
+
+    for i in range(len(roots)-1):
+        if roots[i] in NEG_WORDS:
+            nxt = roots[i+1]
+            for a in ASPEK:
+                if nxt in SEED_ROOTS[a]:
+                    return a
+    return None
 
 def has_aspect_evidence(tokens_plain, SEED_ROOTS):
     roots = {_root_id(t) for t in tokens_plain}
@@ -866,8 +883,13 @@ def segment_text_merge_by_aspect(text: str, use_lexicon=False):
 
         # hitung seed hits (buat info/debug, tapi tidak dipakai buat switch kalau bukan eksplisit)
         asp_seed, hits = detect_aspect_simple(toks_plain)
-
         asp_explicit = explicit_aspect_from_tokens(toks_plain)
+        
+        # ✅ tambahan aturan negasi-seed (override aspek)
+        asp_neg = detect_aspect_negation_pattern(toks_plain)
+        if asp_neg is not None:
+            asp_explicit = asp_neg
+
 
         if asp_explicit is not None:
             asp = asp_explicit

@@ -239,23 +239,6 @@ def _apply_negation_rules(tokens):
 # =====================================================
 
 @st.cache_resource
-def get_seed_roots_for_aspect(aspek_name: str):
-    """
-    Ambil root seed untuk aspek tertentu langsung dari SEED_DICT.
-    Contoh: aspek_name="Harga" -> return set({"mahal","murah","terjangkau",...})
-    """
-    _, _, _, _, SEED_DICT, _ = load_resources()
-
-    roots = set()
-    for w in SEED_DICT.get(aspek_name, []):
-        if not w:
-            continue
-        parts = w.split("_") + [w]
-        for p in parts:
-            roots.add(_root_id(p))
-    return roots
-
-
 def load_resources():
     dictionary = Dictionary.load(os.path.join(MODEL_DIR, "dictionary.gensim"))
     lda = LdaModel.load(os.path.join(MODEL_DIR, "lda_model.gensim"))
@@ -851,13 +834,12 @@ def merge_short_tail_segments(segs, SEED_ROOTS, use_lexicon=False, max_words=2):
 
 def segment_text_merge_by_aspect(text: str, use_lexicon=False):
     """
-    LOGIKA FINAL (versi stabil + seed-aware):
+    LOGIKA FINAL:
     1) split kasar (tanda baca + konjungsi)
-    2) kalau chunk mengandung kata aspek eksplisit (BASE_ROOT) -> pakai itu
-    3) tambahan: kalau chunk mengandung seed yg kuat (misal seed Harga) -> pakai itu (langsung)
-    4) kalau tidak ada aspek eksplisit -> WARISKAN aspek sebelumnya (JANGAN switch pakai seed)
-    5) kalau awal teks tanpa eksplisit -> pakai seed dominan
-    6) merge jika aspek sama
+    2) kalau chunk mengandung kata aspek eksplisit (kemas/aroma/tekstur/harga/efek) -> pakai itu (switch boleh)
+    3) kalau tidak ada kata aspek eksplisit -> WARISKAN aspek sebelumnya (JANGAN switch pakai seed)
+    4) kalau awal teks dan tidak ada aspek eksplisit -> baru pakai seed
+    5) merge jika aspek sama
     """
     _, _, bigram, _, _, _ = load_resources()
 
@@ -865,40 +847,13 @@ def segment_text_merge_by_aspect(text: str, use_lexicon=False):
     if not chunks:
         return []
 
-    # ✅ Ambil seed root per aspek sekali saja
-    SEED_HARGA = get_seed_roots_for_aspect("Harga")
-    SEED_AROMA = get_seed_roots_for_aspect("Aroma")
-    SEED_TEKSTUR = get_seed_roots_for_aspect("Tekstur")
-    SEED_KEMASAN = get_seed_roots_for_aspect("Kemasan")
-    SEED_EFEK = get_seed_roots_for_aspect("Efek")
-
-    SEED_BY_ASPEK = {
-        "Harga": SEED_HARGA,
-        "Aroma": SEED_AROMA,
-        "Tekstur": SEED_TEKSTUR,
-        "Kemasan": SEED_KEMASAN,
-        "Efek": SEED_EFEK,
-    }
-
     def explicit_aspect_from_tokens(tokens_plain):
-        """
-        eksplisit = BASE_ROOT ATAU seed langsung.
-        BASE_ROOT lebih kuat, tapi seed Harga juga bisa jadi eksplisit.
-        """
-        roots = {_root_id(tok) for tok in tokens_plain}
-
-        # ✅ 1) cek BASE_ROOT dulu (harganya, teksturnya, aromanya, dll)
+        # cek substring base_root (harganya -> harga, kemasannya -> kemas, dst)
         for tok in tokens_plain:
             r = _root_id(tok)
             for a in ASPEK:
                 if BASE_ROOT[a] in r:
                     return a
-
-        # ✅ 2) cek seed langsung (misal mahal/murah = Harga)
-        for a in ASPEK:
-            if len(SEED_BY_ASPEK[a] & roots) > 0:
-                return a
-
         return None
 
     segs = []
@@ -909,24 +864,20 @@ def segment_text_merge_by_aspect(text: str, use_lexicon=False):
         if use_lexicon:
             toks_plain = normalize_tokens_with_lexicon(toks_plain)
 
-        if not toks_plain:
-            continue
-
-        # hitung seed hits (buat info/debug)
+        # hitung seed hits (buat info/debug, tapi tidak dipakai buat switch kalau bukan eksplisit)
         asp_seed, hits = detect_aspect_simple(toks_plain)
 
-        # ✅ aspek eksplisit (BASE_ROOT / seed langsung)
         asp_explicit = explicit_aspect_from_tokens(toks_plain)
 
         if asp_explicit is not None:
             asp = asp_explicit
             last_aspect = asp_explicit
         else:
-            # ✅ LANJUTAN -> ikut aspek sebelumnya
+            # ✅ LANJUTAN KONTEN -> ikut aspek sebelumnya
             if last_aspect is not None:
                 asp = last_aspect
             else:
-                # awal teks tanpa eksplisit -> pakai seed dominan
+                # awal teks tanpa kata aspek eksplisit -> pakai seed
                 asp = asp_seed
 
         toks_lda = tokenize_from_val(ch, bigram=bigram)
@@ -946,9 +897,11 @@ def segment_text_merge_by_aspect(text: str, use_lexicon=False):
             segs[-1]["tokens"].extend(item["tokens"])
         else:
             segs.append(item)
+    # ✅ merge segmen super pendek (mis: "akan", "tetap") jika tidak punya seed/base_root
+    _, _, _, _, _, SEED_ROOTS = load_resources()
+    segs = merge_short_tail_segments(segs, SEED_ROOTS, use_lexicon=use_lexicon, max_words=3)
 
     return segs
-
 
 
 

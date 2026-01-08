@@ -789,6 +789,67 @@ def split_by_aspect_anchor_inside_chunk(chunk: str):
             parts.append(seg)
 
     return parts
+def split_by_seed_shift(chunk: str, min_hits=1):
+    """
+    Potong chunk jika seed aspek lain muncul setelah anchor awal.
+    Cocok untuk kasus: awal Tekstur, tengah muncul seed Efek (lembap/perih/panas).
+    """
+
+    _, _, _, _, _, SEED_ROOTS = load_resources()
+
+    toks = _simple_clean(chunk).split()
+    if not toks:
+        return []
+
+    # ambil aspek awal dari BASE_ROOT (kalau ada)
+    first_anchor = None
+    for tok in toks:
+        r = _root_id(tok)
+        for a in ASPEK:
+            if BASE_ROOT[a] in r:
+                first_anchor = a
+                break
+        if first_anchor:
+            break
+
+    # kalau tidak ada anchor, skip (chunk ini sudah akan ditangani oleh seed dominan)
+    if first_anchor is None:
+        return [chunk]
+
+    cuts = [0]
+    buffer = []
+
+    for i, tok in enumerate(toks):
+        buffer.append(tok)
+        roots_buf = {_root_id(t) for t in buffer}
+
+        # cek apakah ada seed aspek lain yang muncul cukup kuat
+        for a in ASPEK:
+            if a == first_anchor:
+                continue
+            hits = len(SEED_ROOTS[a] & roots_buf)
+
+            if hits >= min_hits:
+                # cut sebelum bagian seed aspek baru ini
+                if i not in cuts:
+                    cuts.append(i)
+                # reset buffer utk deteksi berikutnya
+                buffer = []
+                first_anchor = a
+                break
+
+    cuts = sorted(set(cuts))
+
+    parts = []
+    for j in range(len(cuts)):
+        start = cuts[j]
+        end = cuts[j+1] if j+1 < len(cuts) else len(toks)
+
+        seg = " ".join(toks[start:end]).strip()
+        if seg:
+            parts.append(seg)
+
+    return parts
 
 def detect_aspect_simple(tokens):
     """
@@ -893,7 +954,12 @@ def segment_text_merge_by_aspect(text: str, use_lexicon=False):
     chunks_raw = split_by_punct_and_conj(text)
     chunks = []
     for ch in chunks_raw:
-        chunks.extend(split_by_aspect_anchor_inside_chunk(ch))
+        # 1) split dulu kalau ada BASE_ROOT muncul di tengah chunk
+        tmp = split_by_aspect_anchor_inside_chunk(ch)
+    
+        # 2) lalu split lagi kalau seed aspek lain muncul di tengah segmen
+        for seg in tmp:
+            chunks.extend(split_by_seed_shift(seg, min_hits=1))
 
     if not chunks:
         return []

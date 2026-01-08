@@ -792,7 +792,8 @@ def split_by_aspect_anchor_inside_chunk(chunk: str):
 def split_by_seed_shift(chunk: str, min_hits=1):
     """
     Potong chunk jika seed aspek lain muncul setelah anchor awal.
-    Cocok untuk kasus: awal Tekstur, tengah muncul seed Efek (lembap/perih/panas).
+    RETURN list of dict:
+    [{"text": ..., "forced_aspect": ...}, ...]
     """
 
     _, _, _, _, _, SEED_ROOTS = load_resources()
@@ -801,53 +802,56 @@ def split_by_seed_shift(chunk: str, min_hits=1):
     if not toks:
         return []
 
-    # ambil aspek awal dari BASE_ROOT (kalau ada)
-    first_anchor = None
+    # cari anchor awal dari BASE_ROOT dulu (tekstur/harga/aroma/kemas/efek)
+    current_aspect = None
     for tok in toks:
         r = _root_id(tok)
         for a in ASPEK:
             if BASE_ROOT[a] in r:
-                first_anchor = a
+                current_aspect = a
                 break
-        if first_anchor:
+        if current_aspect:
             break
 
-    # kalau tidak ada anchor, skip (chunk ini sudah akan ditangani oleh seed dominan)
-    if first_anchor is None:
-        return [chunk]
+    # kalau tidak ada anchor awal, pakai seed dominan saja
+    if current_aspect is None:
+        asp_seed, _ = detect_aspect_simple(toks)
+        return [{"text": chunk, "forced_aspect": asp_seed}]
 
-    cuts = [0]
+    parts = []
+    start = 0
     buffer = []
 
     for i, tok in enumerate(toks):
         buffer.append(tok)
         roots_buf = {_root_id(t) for t in buffer}
 
-        # cek apakah ada seed aspek lain yang muncul cukup kuat
+        # cek seed aspek lain
+        best_shift = None
+        best_hits = 0
         for a in ASPEK:
-            if a == first_anchor:
+            if a == current_aspect:
                 continue
             hits = len(SEED_ROOTS[a] & roots_buf)
+            if hits >= min_hits and hits > best_hits:
+                best_hits = hits
+                best_shift = a
 
-            if hits >= min_hits:
-                # cut sebelum bagian seed aspek baru ini
-                if i not in cuts:
-                    cuts.append(i)
-                # reset buffer utk deteksi berikutnya
-                buffer = []
-                first_anchor = a
-                break
+        if best_shift is not None:
+            # segmen sebelum shift
+            seg = " ".join(toks[start:i]).strip()
+            if seg:
+                parts.append({"text": seg, "forced_aspect": current_aspect})
 
-    cuts = sorted(set(cuts))
+            # reset
+            start = i
+            buffer = []
+            current_aspect = best_shift
 
-    parts = []
-    for j in range(len(cuts)):
-        start = cuts[j]
-        end = cuts[j+1] if j+1 < len(cuts) else len(toks)
-
-        seg = " ".join(toks[start:end]).strip()
-        if seg:
-            parts.append(seg)
+    # segmen terakhir
+    seg_last = " ".join(toks[start:]).strip()
+    if seg_last:
+        parts.append({"text": seg_last, "forced_aspect": current_aspect})
 
     return parts
 
@@ -954,12 +958,7 @@ def segment_text_merge_by_aspect(text: str, use_lexicon=False):
     chunks_raw = split_by_punct_and_conj(text)
     chunks = []
     for ch in chunks_raw:
-        # 1) split dulu kalau ada BASE_ROOT muncul di tengah chunk
-        tmp = split_by_aspect_anchor_inside_chunk(ch)
-    
-        # 2) lalu split lagi kalau seed aspek lain muncul di tengah segmen
-        for seg in tmp:
-            chunks.extend(split_by_seed_shift(seg, min_hits=1))
+        chunks.extend(split_by_seed_shift(ch, min_hits=1))
 
     if not chunks:
         return []
@@ -977,9 +976,9 @@ def segment_text_merge_by_aspect(text: str, use_lexicon=False):
     last_aspect = None
 
     for ch in chunks:
-        toks_plain = _simple_clean(ch).split()
-        if use_lexicon:
-            toks_plain = normalize_tokens_with_lexicon(toks_plain)
+        ch_text = ch["text"]
+        forced_aspect = ch.get("forced_aspect", None)
+        toks_plain = _simple_clean(ch_text).split()
 
         # hitung seed hits (buat info/debug, tapi tidak dipakai buat switch kalau bukan eksplisit)
         asp_seed, hits = detect_aspect_simple(toks_plain)
@@ -991,15 +990,17 @@ def segment_text_merge_by_aspect(text: str, use_lexicon=False):
             asp_explicit = asp_neg
 
 
-        if asp_explicit is not None:
+        if forced_aspect is not None:
+            asp = forced_aspect
+            last_aspect = asp
+        else:
+            if asp_explicit is not None:
             asp = asp_explicit
             last_aspect = asp_explicit
-        else:
-            # ✅ LANJUTAN KONTEN -> ikut aspek sebelumnya
-            if last_aspect is not None:
-                asp = last_aspect
             else:
-                # awal teks tanpa kata aspek eksplisit -> pakai seed
+                if last_aspect is not None:
+                asp = last_aspect
+                else:
                 asp = asp_seed
 
         toks_lda = tokenize_from_val(ch, bigram=bigram)

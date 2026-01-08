@@ -976,50 +976,49 @@ def segment_text_merge_by_aspect(text: str, use_lexicon=False):
     last_aspect = None
 
     for ch in chunks:
-        ch_text = ch["text"]
-        forced_aspect = ch.get("forced_aspect", None)
-        toks_plain = _simple_clean(ch_text).split()
+    ch_text = ch["text"]
+    forced_aspect = ch.get("forced_aspect", None)
 
-        # hitung seed hits (buat info/debug, tapi tidak dipakai buat switch kalau bukan eksplisit)
-        asp_seed, hits = detect_aspect_simple(toks_plain)
-        asp_explicit = explicit_aspect_from_tokens(toks_plain)
-        
-        # ✅ tambahan aturan negasi-seed (override aspek)
-        asp_neg = detect_aspect_negation_pattern(toks_plain)
-        if asp_neg is not None:
-            asp_explicit = asp_neg
+    toks_plain = _simple_clean(ch_text).split()
+    if use_lexicon:
+        toks_plain = normalize_tokens_with_lexicon(toks_plain)
 
+    if not toks_plain:
+        continue
 
-        if forced_aspect is not None:
-            asp = forced_aspect
-            last_aspect = asp
+    asp_seed, hits = detect_aspect_simple(toks_plain)
+    asp_explicit = explicit_aspect_from_tokens(toks_plain)
+
+    # ✅ forced aspect override (hasil split_by_seed_shift)
+    if forced_aspect is not None:
+        asp = forced_aspect
+        last_aspect = asp
+    else:
+        if asp_explicit is not None:
+            asp = asp_explicit
+            last_aspect = asp_explicit
         else:
-            if asp_explicit is not None:
-                asp = asp_explicit
-                last_aspect = asp_explicit
+            if last_aspect is not None:
+                asp = last_aspect
             else:
-                if last_aspect is not None:
-                    asp = last_aspect
-                else:
-                    asp = asp_seed
+                asp = asp_seed
 
-        toks_lda = tokenize_from_val(ch, bigram=bigram)
-        if use_lexicon:
-            toks_lda = normalize_tokens_with_lexicon(toks_lda)
+    toks_lda = tokenize_from_val(ch_text, bigram=bigram)
+    if use_lexicon:
+        toks_lda = normalize_tokens_with_lexicon(toks_lda)
 
-        item = {
-            "seg_text": ch.strip(),
-            "tokens": toks_lda,
-            "anchor_aspect": asp,
-            "seed_hits": hits
-        }
+    item = {
+        "seg_text": ch_text.strip(),
+        "tokens": toks_lda,
+        "anchor_aspect": asp,
+        "seed_hits": hits
+    }
 
-        # merge kalau aspek sama
-        if segs and asp is not None and segs[-1]["anchor_aspect"] == asp:
-            segs[-1]["seg_text"] += " " + item["seg_text"]
-            segs[-1]["tokens"].extend(item["tokens"])
-        else:
-            segs.append(item)
+    if segs and asp is not None and segs[-1]["anchor_aspect"] == asp:
+        segs[-1]["seg_text"] += " " + item["seg_text"]
+        segs[-1]["tokens"].extend(item["tokens"])
+    else:
+        segs.append(item)
     # ✅ merge segmen super pendek (mis: "akan", "tetap") jika tidak punya seed/base_root
     _, _, _, _, _, SEED_ROOTS = load_resources()
     segs = merge_short_tail_segments(segs, SEED_ROOTS, use_lexicon=use_lexicon, max_words=3)

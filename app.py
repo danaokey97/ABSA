@@ -979,7 +979,18 @@ def test_segmented_text(
 
         seed_hits = info.get("seed_hits", hits_lda)
 
-        aspect_final = anchor if anchor is not None else aspect_pred
+        # ✅ seed_dom = aspek seed paling dominan
+        seed_dom = dominant_seed_aspect(seed_hits)
+        
+        if anchor is not None:
+            aspect_final = anchor
+        else:
+            # ✅ kalau seed ada → paksa ikut seed (override ringan)
+            if seed_dom is not None and p_boost.get(seed_dom, 0) >= 0.20:
+                aspect_final = seed_dom
+            else:
+                aspect_final = aspect_pred
+
         prob_final = p_boost.get(aspect_final, 0.0)
 
         labeled.append({

@@ -759,6 +759,36 @@ def split_by_punct_and_conj(text: str):
                 out.append(right)
 
     return out
+def split_by_aspect_anchor_inside_chunk(chunk: str):
+    """
+    Kalau ada kata aspek eksplisit (BASE_ROOT) muncul di tengah chunk,
+    potong chunk jadi beberapa bagian.
+    """
+    toks = _simple_clean(chunk).split()
+    if not toks:
+        return []
+
+    cuts = [0]   # start selalu 0
+
+    for i, tok in enumerate(toks):
+        r = _root_id(tok)
+        for a in ASPEK:
+            if BASE_ROOT[a] in r:
+                if i not in cuts:
+                    cuts.append(i)
+
+    cuts = sorted(set(cuts))
+
+    parts = []
+    for j in range(len(cuts)):
+        start = cuts[j]
+        end = cuts[j+1] if j+1 < len(cuts) else len(toks)
+
+        seg = " ".join(toks[start:end]).strip()
+        if seg:
+            parts.append(seg)
+
+    return parts
 
 def detect_aspect_simple(tokens):
     """
@@ -860,7 +890,11 @@ def segment_text_merge_by_aspect(text: str, use_lexicon=False):
     """
     _, _, bigram, _, _, _ = load_resources()
 
-    chunks = split_by_punct_and_conj(text)
+    chunks_raw = split_by_punct_and_conj(text)
+    chunks = []
+    for ch in chunks_raw:
+        chunks.extend(split_by_aspect_anchor_inside_chunk(ch))
+
     if not chunks:
         return []
 

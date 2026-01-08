@@ -728,37 +728,72 @@ def split_by_punct_and_conj(text: str):
     Split kasar:
     - tanda baca: . ! ? ; :
     - konjungsi: tapi/namun/dst (konjungsi dibuang)
+    - tambahan: split pola efek dalam 1 chunk (bikin/membuat/jadi/hasilnya)
     Koma tidak memotong.
     """
     text = str(text).replace("\n", ". ")
-    # split tanda baca dulu
+
+    # ✅ split tanda baca dulu
     parts = re.split(r"[.!?;:]+", text)
     parts = [p.strip() for p in parts if p.strip()]
 
     out = []
+
+    # ✅ pola pemicu Efek di tengah chunk
+    EFFECT_TRIGGERS = {"bikin", "membuat", "jadi", "hasilnya"}
+
     for p in parts:
         toks = _simple_clean(p).split()
         if not toks:
             continue
 
-        # split sekali pada konjungsi pertama yang ketemu
-        cut = None
+        # ✅ split konjungsi sekali (tapi/namun/dst)
+        cut_conj = None
         for i, t in enumerate(toks):
             if t in CONJ_SPLIT_WORDS and 0 < i < len(toks) - 1:
-                cut = i
+                cut_conj = i
                 break
 
-        if cut is None:
-            out.append(" ".join(toks).strip())
-        else:
-            left = " ".join(toks[:cut]).strip()
-            right = " ".join(toks[cut+1:]).strip()
+        if cut_conj is not None:
+            left = " ".join(toks[:cut_conj]).strip()
+            right = " ".join(toks[cut_conj+1:]).strip()
+            if left:
+                toks_left = left.split()
+                # lanjut cek efek trigger di dalam segmen left
+                out.extend(_split_effect_trigger(toks_left, EFFECT_TRIGGERS))
+            if right:
+                toks_right = right.split()
+                out.extend(_split_effect_trigger(toks_right, EFFECT_TRIGGERS))
+            continue
+
+        # ✅ kalau ga ada konjungsi, cek trigger efek
+        out.extend(_split_effect_trigger(toks, EFFECT_TRIGGERS))
+
+    return out
+
+
+def _split_effect_trigger(toks, EFFECT_TRIGGERS):
+    """
+    Jika ada 'tekstur...' lalu muncul 'bikin/membuat/jadi/hasilnya'
+    maka potong jadi segmen baru.
+    """
+    if not toks:
+        return []
+
+    # cari trigger efek setelah minimal 2 kata pertama
+    for i, t in enumerate(toks):
+        if t in EFFECT_TRIGGERS and i >= 2 and i < len(toks) - 1:
+            left = " ".join(toks[:i]).strip()
+            right = " ".join(toks[i:]).strip()
+            out = []
             if left:
                 out.append(left)
             if right:
                 out.append(right)
+            return out
 
-    return out
+    return [" ".join(toks).strip()]
+
 def split_by_aspect_anchor_inside_chunk(chunk: str):
     """
     Kalau ada kata aspek eksplisit (BASE_ROOT) muncul di tengah chunk,

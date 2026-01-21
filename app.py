@@ -1347,9 +1347,9 @@ def run_absa_on_dataframe(df_raw, _sent_models):
             seg_text = seg["seg_text"]
 
             # Dataset: preprocessing sentimen juga tetap "ringan" (tanpa lexicon)
-            sent_label, _ = predict_sentiment_for_segment(
+            sent_label, _, _ = predict_sentiment_for_segment(
                 seg_text, aspek, _sent_models, use_lexicon=False
-            )
+                )
 
             data_rows.append({
                 "original_index": idx,

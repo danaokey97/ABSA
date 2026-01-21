@@ -741,7 +741,7 @@ def split_by_punct_and_conj(text: str):
     Koma tidak memotong.
     """
     text = str(text).replace("\n", ". ")
-
+    print("DEBUG: split_by_punct_and_conj NEW RUNNING")
     # ✅ split tanda baca dulu
     parts = re.split(r"[.!?;:]+", text)
     parts = [p.strip() for p in parts if p.strip()]

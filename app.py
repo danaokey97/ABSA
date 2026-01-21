@@ -1079,17 +1079,8 @@ def segment_text_merge_by_aspect(text: str, use_lexicon=False):
     + FIX: cue aspek pendek digabung ke kanan, dan split seed shift tidak agresif
     """
     _, _, bigram, _, _, _ = load_resources()
-
     chunks_raw = split_by_punct_and_conj(text)
-
-    # ✅ FIX 1: seed shift jangan terlalu agresif
-    chunks = []
-    for ch in chunks_raw:
-        # dari min_hits=1 -> 2 biar gak gampang kepotong
-        chunks.extend(split_by_seed_shift(ch, min_hits=2))
-
-    if not chunks:
-        return []
+    chunks = [{"text": ch, "forced_aspect": None} for ch in chunks_raw]
 
     def explicit_aspect_from_tokens(tokens_plain):
         for tok in tokens_plain:
@@ -1144,21 +1135,75 @@ def segment_text_merge_by_aspect(text: str, use_lexicon=False):
         else:
             segs.append(item)
 
+       # =========================
+    # FIX SEGMENTASI: forward-merge cue aspek & connector
+    # (tanpa ubah komponen lain)
     # =========================
-    # POST-MERGE FIX (URUTAN PENTING)
-    # =========================
+    
+    CONNECTOR_TAIL = {"sehingga", "karena", "dan", "atau", "dari", "segi", "namun", "tapi", "akan"}
+    
+    def is_aspect_cue_short(seg_text: str, max_words: int = 3):
+        toks = _simple_clean(seg_text).split()
+        if use_lexicon:
+            toks = normalize_tokens_with_lexicon(toks)
+    
+        if not toks or len(toks) > max_words:
+            return False
+    
+        # cue aspek kalau ada BASE_ROOT (kemas/aroma/tekstur/harga/efek)
+        for tok in toks:
+            r = _root_id(tok)
+            for a in ASPEK:
+                if BASE_ROOT[a] in r:
+                    return True
+        return False
+    
+    def ends_with_connector(seg_text: str):
+        toks = _simple_clean(seg_text).split()
+        if use_lexicon:
+            toks = normalize_tokens_with_lexicon(toks)
+        if not toks:
+            return False
+    
+        # kasus "dari segi" (2 token)
+        if len(toks) >= 2 and toks[-2] == "dari" and toks[-1] == "segi":
+            return True
+    
+        return toks[-1] in CONNECTOR_TAIL
+    
+    
+    # 1) forward merge: cue aspek pendek / connector gantung -> gabung ke kanan
+    fixed = []
+    i = 0
+    while i < len(segs):
+        curr = segs[i]
+    
+        if i + 1 < len(segs) and (is_aspect_cue_short(curr["seg_text"], 3) or ends_with_connector(curr["seg_text"])):
+            nxt = segs[i + 1]
+    
+            # gabung teks + tokens ke kanan
+            nxt["seg_text"] = curr["seg_text"].rstrip(" ,") + " " + nxt["seg_text"].lstrip(" ,")
+            nxt["tokens"] = curr.get("tokens", []) + nxt.get("tokens", [])
+    
+            # kalau cue aspek, paksa aspek kanan mengikuti aspek cue (ini inti kasus "kemasan produk"!)
+            if is_aspect_cue_short(curr["seg_text"], 3) and curr.get("anchor_aspect") is not None:
+                nxt["anchor_aspect"] = curr["anchor_aspect"]
+    
+            i += 1
+            continue
+    
+        fixed.append(curr)
+        i += 1
+    
+    segs = fixed
+    
+    # 2) merge pendek yang sudah kamu punya tetap dipakai (biar aman)
     _, _, _, _, _, SEED_ROOTS = load_resources()
-
-    # ✅ FIX 2: segmen cue aspek pendek ("kemasan produk", "teksturnya", "aromanya") -> gabung ke kanan
-    segs = merge_aspect_cue_forward(segs, use_lexicon=use_lexicon, max_words=3)
-
-    # ✅ FIX 3: segmen gantung ("dari segi", "sehingga", "karena", dst) + fragmen pendek
     segs = merge_short_tail_segments(segs, SEED_ROOTS, use_lexicon=use_lexicon, max_words=5)
-
-    # ✅ FIX 4: segmen pendek lain biar tidak berdiri sendiri
     segs = merge_very_short_segments_always(segs, use_lexicon=use_lexicon, max_words=5)
-
+    
     return segs
+
 
 def test_segmented_text(
     text,

@@ -737,6 +737,7 @@ def split_by_punct_and_conj(text: str):
     - tanda baca: . ! ? ; :
     - konjungsi: tapi/namun/dst (konjungsi dibuang)
     - tambahan: split pola efek dalam 1 chunk (bikin/membuat/jadi/hasilnya)
+    - tambahan FIX: potong pola "dari segi <aspek>" agar aspek baru tidak nyangkut di segmen sebelumnya
     Koma tidak memotong.
     """
     text = str(text).replace("\n", ". ")
@@ -747,35 +748,75 @@ def split_by_punct_and_conj(text: str):
 
     out = []
 
-    # ✅ pola pemicu Efek di tengah chunk
     EFFECT_TRIGGERS = {"bikin", "membuat", "jadi", "hasilnya"}
 
-    for p in parts:
-        toks = _simple_clean(p).split()
+    def _split_on_dari_segi_aspect(chunk: str):
+        """
+        Potong jika ada pola: 'dari segi <aspek> ...'
+        contoh: 'kemasan ... dari segi harga ...' -> ['kemasan ...', 'dari segi harga ...']
+        """
+        toks = _simple_clean(chunk).split()
         if not toks:
+            return []
+
+        cuts = [0]
+        for i in range(len(toks) - 2):
+            if toks[i] == "dari" and toks[i + 1] == "segi":
+                nxt = toks[i + 2]
+                r = _root_id(nxt)
+
+                # cek apakah nxt mengandung aspek (harga/aroma/tekstur/kemas/efek)
+                hit = False
+                for a in ASPEK:
+                    if BASE_ROOT[a] in r:
+                        hit = True
+                        break
+
+                # kalau hit dan bukan di awal, potong dari posisi i ("dari")
+                if hit and i > 0:
+                    cuts.append(i)
+
+        cuts = sorted(set(cuts))
+
+        chunks = []
+        for j in range(len(cuts)):
+            s = cuts[j]
+            e = cuts[j + 1] if j + 1 < len(cuts) else len(toks)
+            seg = " ".join(toks[s:e]).strip()
+            if seg:
+                chunks.append(seg)
+        return chunks
+
+    for p in parts:
+        # ✅ FIX: pecah dulu kalau ada "dari segi <aspek>"
+        subparts = _split_on_dari_segi_aspect(p)
+        if not subparts:
             continue
 
-        # ✅ split konjungsi sekali (tapi/namun/dst)
-        cut_conj = None
-        for i, t in enumerate(toks):
-            if t in CONJ_SPLIT_WORDS and 0 < i < len(toks) - 1:
-                cut_conj = i
-                break
+        for sub in subparts:
+            toks = _simple_clean(sub).split()
+            if not toks:
+                continue
 
-        if cut_conj is not None:
-            left = " ".join(toks[:cut_conj]).strip()
-            right = " ".join(toks[cut_conj+1:]).strip()
-            if left:
-                toks_left = left.split()
-                # lanjut cek efek trigger di dalam segmen left
-                out.extend(_split_effect_trigger(toks_left, EFFECT_TRIGGERS))
-            if right:
-                toks_right = right.split()
-                out.extend(_split_effect_trigger(toks_right, EFFECT_TRIGGERS))
-            continue
+            # ✅ split konjungsi sekali (tapi/namun/dst)
+            cut_conj = None
+            for i, t in enumerate(toks):
+                if t in CONJ_SPLIT_WORDS and 0 < i < len(toks) - 1:
+                    cut_conj = i
+                    break
 
-        # ✅ kalau ga ada konjungsi, cek trigger efek
-        out.extend(_split_effect_trigger(toks, EFFECT_TRIGGERS))
+            if cut_conj is not None:
+                left = " ".join(toks[:cut_conj]).strip()
+                right = " ".join(toks[cut_conj + 1:]).strip()
+
+                if left:
+                    out.extend(_split_effect_trigger(left.split(), EFFECT_TRIGGERS))
+                if right:
+                    out.extend(_split_effect_trigger(right.split(), EFFECT_TRIGGERS))
+                continue
+
+            # ✅ kalau ga ada konjungsi, cek trigger efek
+            out.extend(_split_effect_trigger(toks, EFFECT_TRIGGERS))
 
     return out
 

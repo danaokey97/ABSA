@@ -392,7 +392,7 @@ POLAR_SWAP = {
 
 
 SEGMENT_STOPWORDS = {
-    "dari", "segi", "sehingga", "karena",
+    "sehingga", "karena",
     "tidak", "gak", "nggak", "enggak", "ga","g",
     "banget", "aja", "sih", "dong", "kok",
     "dan", "atau", "yang", "itu", "ini",

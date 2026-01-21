@@ -335,20 +335,27 @@ def preprocess_for_sentiment(text: str, use_lexicon: bool = False) -> str:
 
 def predict_sentiment_for_segment(seg_text: str, aspek: str, sent_models: dict, use_lexicon: bool = False):
     if aspek not in sent_models:
-        return None, None
+        return None, None, None
 
     clf, vec = sent_models[aspek]
     X = vec.transform([preprocess_for_sentiment(seg_text, use_lexicon=use_lexicon)])
 
     y_pred = clf.predict(X)[0]
-
+    confidence = None
     prob_pos = None
+
     if hasattr(clf, "predict_proba"):
         proba = clf.predict_proba(X)[0]
-        if "Positive" in clf.classes_:
-            prob_pos = float(proba[list(clf.classes_).index("Positive")])
+        classes = list(clf.classes_)
 
-    return y_pred, prob_pos
+        best_idx = int(np.argmax(proba))
+        y_pred = classes[best_idx]
+        confidence = float(proba[best_idx])
+
+        if "Positive" in classes:
+            prob_pos = float(proba[classes.index("Positive")])
+
+    return y_pred, confidence, prob_pos
 
 # =====================================================
 # FUNGSI INTI: DETEKSI ASPEK + SEGMENTASI (LDA)
@@ -1449,17 +1456,16 @@ def main():
             for r in results:
                 aspek = r["aspect_final"]
                 seg_text = r["seg_text"]
-
-                # Sentimen pun pakai preproses yang sama (lexicon=True)
-                sent_label, _ = predict_sentiment_for_segment(
+                sent_label, conf, _ = predict_sentiment_for_segment(
                     seg_text, aspek, sent_models, use_lexicon=True
                 )
-
+                
                 rows.append({
                     "Segmen": r["seg_index"],
                     "Teks Segmen": seg_text,
                     "Aspek": aspek,
                     "Sentimen": sent_label,
+                    "Confidence(%)": None if conf is None else round(conf * 100, 2),
                 })
 
             st.dataframe(pd.DataFrame(rows), use_container_width=True)

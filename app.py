@@ -1086,7 +1086,7 @@ def segment_text_merge_by_aspect(text: str, use_lexicon=False):
     chunks = []
     for ch in chunks_raw:
         # dari min_hits=1 -> 2 biar gak gampang kepotong
-        chunks.extend(split_by_seed_shift(ch, min_hits=2))
+        chunks.append({"text": ch, "forced_aspect": None})
 
     if not chunks:
         return []
@@ -1122,9 +1122,9 @@ def segment_text_merge_by_aspect(text: str, use_lexicon=False):
         else:
             if asp_explicit is not None:
                 asp = asp_explicit
-                last_aspect = asp_explicit
+                last_aspect = asp
             else:
-                asp = last_aspect if last_aspect is not None else asp_seed
+                asp = last_aspect   # WARISKAN SAJA
 
         toks_lda = tokenize_from_val(ch_text, bigram=bigram)
         if use_lexicon:

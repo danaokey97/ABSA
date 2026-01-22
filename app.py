@@ -977,6 +977,33 @@ def has_aspect_evidence(tokens_plain, SEED_ROOTS):
             return True
 
     return False
+def merge_leading_short_segment(segs, use_lexicon=False, max_words=3):
+    if not segs or len(segs) < 2:
+        return segs
+
+    first = segs[0]
+    toks = _simple_clean(first["seg_text"]).split()
+    if use_lexicon:
+        toks = normalize_tokens_with_lexicon(toks)
+
+    # kalau pendek dan tidak ada aspek eksplisit -> gabung ke segmen kedua
+    has_explicit = False
+    for tok in toks:
+        r = _root_id(tok)
+        for a in ASPEK:
+            if BASE_ROOT[a] in r:
+                has_explicit = True
+                break
+        if has_explicit:
+            break
+
+    if len(toks) <= max_words and not has_explicit:
+        segs[1]["seg_text"] = first["seg_text"].rstrip(" ,") + " " + segs[1]["seg_text"].lstrip(" ,")
+        segs[1]["tokens"] = first.get("tokens", []) + segs[1].get("tokens", [])
+        return segs[1:]
+
+    return segs
+
 def merge_very_short_segments_always(segs, use_lexicon=False, max_words=3):
     """
     Merge segmen super pendek (<= max_words) ke segmen sebelumnya,
@@ -1191,7 +1218,7 @@ def segment_text_merge_by_aspect(text: str, use_lexicon=False):
     _, _, _, _, _, SEED_ROOTS = load_resources()
     segs = merge_short_tail_segments(segs, SEED_ROOTS, use_lexicon=use_lexicon, max_words=5)
     segs = merge_very_short_segments_always(segs, use_lexicon=use_lexicon, max_words=5)
-
+    segs = merge_leading_short_segment(segs, use_lexicon=use_lexicon, max_words=3)
     return segs
 
 
@@ -1425,7 +1452,7 @@ def run_absa_on_dataframe(df_raw, _sent_models):
         text = str(row["text-content"])
 
         # Untuk dataset → gunakan use_lexicon=False (konsisten dengan korpus LDA)
-        segments = test_segmented_text(text, use_lexicon=True)
+        segments = test_segmented_text(text, use_lexicon=False)
 
         for seg in segments:
             aspek = seg["aspect_final"]

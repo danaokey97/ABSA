@@ -1545,7 +1545,7 @@ def main():
                     "Teks Segmen": seg_text,
                     "Aspek": aspek,
                     "Sentimen": sent_label,
-                    "Confidence(%)": None if conf is None else round(conf * 100, 2),
+                    "Accuracy(%)": None if conf is None else round(conf * 100, 2),
                 })
 
             st.dataframe(pd.DataFrame(rows), use_container_width=True)

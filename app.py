@@ -1425,7 +1425,7 @@ def run_absa_on_dataframe(df_raw, _sent_models):
         text = str(row["text-content"])
 
         # Untuk dataset → gunakan use_lexicon=False (konsisten dengan korpus LDA)
-        segments = test_segmented_text(text, use_lexicon=False)
+        segments = test_segmented_text(text, use_lexicon=True)
 
         for seg in segments:
             aspek = seg["aspect_final"]

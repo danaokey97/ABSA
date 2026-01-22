@@ -1112,13 +1112,18 @@ def segment_text_merge_by_aspect(text: str, use_lexicon=False):
         str(text),
         flags=re.IGNORECASE
     )
-
     chunks_raw = split_by_punct_and_conj(text)
-
-    # kalau kamu sebelumnya sudah matiin seed_shift, biarin seperti ini.
-    # kalau masih pakai seed_shift, ganti sesuai kebutuhanmu.
-    chunks = [{"text": ch, "forced_aspect": None} for ch in chunks_raw]
-
+    
+    # ✅ FIX: pecah lagi kalau di tengah chunk ada anchor aspek eksplisit (BASE_ROOT)
+    chunks_expanded = []
+    for ch in chunks_raw:
+        parts = split_by_aspect_anchor_inside_chunk(ch)  # <- fungsi kamu yang sudah ada
+        if parts:
+            chunks_expanded.extend(parts)
+        else:
+            chunks_expanded.append(ch)
+    
+    chunks = [{"text": ch, "forced_aspect": None} for ch in chunks_expanded]
     if not chunks:
         return []
 
@@ -1420,7 +1425,7 @@ def run_absa_on_dataframe(df_raw, _sent_models):
         text = str(row["text-content"])
 
         # Untuk dataset → gunakan use_lexicon=False (konsisten dengan korpus LDA)
-        segments = test_segmented_text(text, use_lexicon=True)
+        segments = test_segmented_text(text, use_lexicon=False)
 
         for seg in segments:
             aspek = seg["aspect_final"]
